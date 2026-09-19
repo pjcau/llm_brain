@@ -1,0 +1,22 @@
+# Tiers, not models. Models are OpenRouter ids; prices checked on 2026-09-19.
+# fast:      bonsai $0.075/M in · $0.5/M out  — fallback deepseek-v4-flash $0.04 / $0.08
+# reasoning: deepseek-v4-pro $0.42 / $0.84    — fallback qwen3.7-plus $0.32 / $1.28
+tiers:
+  fast:
+    model: prism-ml/ternary-bonsai-2-27b
+    fallback: deepseek/deepseek-v4-flash
+    context: 262144
+    input_usd_per_m: 0.075
+    output_usd_per_m: 0.5
+  reasoning:
+    model: deepseek/deepseek-v4-pro
+    fallback: qwen/qwen3.7-plus
+    context: 1048576
+    input_usd_per_m: 0.42
+    output_usd_per_m: 0.84
+  premium:
+    model: null
+    fallback: null
+    context: 0
+    input_usd_per_m: 0
+    output_usd_per_m: 0

@@ -1,0 +1,33 @@
+[package]
+name = "brain"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "llm_brain CLI — Phase 0: OpenRouter key provisioning, usage snapshots, client setup, benchmark runner"
+
+[[bin]]
+name = "brain"
+path = "src/main.rs"
+
+[features]
+# Integration tests that need a Docker daemon (testcontainers). Run with:
+#   cargo test -p brain --features docker-tests -- --ignored
+docker-tests = ["dep:testcontainers"]
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "fs"] }
+testcontainers = { version = "0.23", optional = true }
+
+[dev-dependencies]
+wiremock = "0.6"

@@ -1,0 +1,22 @@
+# Mined from agent-orchestrator history: fix(core) 9cd05e2 (2026). The human
+# fix is a one-line default change; the tests arrive with the fix.
+id: ago-0001
+repo: https://github.com/pjcau/agent-orchestrator
+commit_before: ca581a2510bf9a7228083026191536f9eb0dea5a
+commit_fix: 9cd05e2927e090a40dd7c9a7395bd0407b6e3980
+prompt: |
+  In src/agent_orchestrator/core/agent.py, mid-run context compaction drops the
+  first tool RESULT the moment it fires. The working context is
+  [user task, assistant tool_call, tool result, ...] and AgentConfig keeps only
+  the first `compaction_keep_head` messages verbatim, which today is 2: the task
+  and the first tool_call survive, the first result is discarded, at no token
+  saving. Change the default so the first tool result survives compaction, and
+  explain the reasoning in a short comment next to the field.
+setup: python -m venv .venv && .venv/bin/pip install -q -e '.[dev]'
+test_files_from_fix:
+  - tests/test_context_benchmark.py
+  - evals/context_benchmark.py
+verify: .venv/bin/pytest tests/test_context_benchmark.py -q -k keep_head
+timeout_s: 900
+max_cost_usd: 0.30
+tags: [python, config-default, small]

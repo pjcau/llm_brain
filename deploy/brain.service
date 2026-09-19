@@ -1,0 +1,22 @@
+# systemd unit for the VPS. Secrets via LoadCredential or an EnvironmentFile
+# with mode 0600; the binary listens on 127.0.0.1 only, Caddy fronts it.
+[Unit]
+Description=llm_brain
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=brain
+Group=brain
+WorkingDirectory=/opt/llm_brain
+EnvironmentFile=/opt/llm_brain/.env
+ExecStart=/opt/llm_brain/brain serve
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/llm_brain/data
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

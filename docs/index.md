@@ -137,6 +137,13 @@ flowchart LR
 
 All diagrams, with sources in `diagrams/`: → [Diagrams](./diagrams.md)
 
+## Where we are
+
+**Phase 0 is running**: the `brain` CLI provisions per-profile OpenRouter
+keys with daily limits, snapshots spend, prints the client setup and runs
+the benchmark suite; every piece has tests, including the real `aider` in
+a container. → [Phase 0 runbook](./phase-0.md)
+
 ## Roadmap in brief
 
 | Phase | What | Output |

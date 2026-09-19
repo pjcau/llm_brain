@@ -25,3 +25,7 @@ yarn-error.log*
 
 # Rust
 /target
+
+# bench
+/bench/.cache
+/brain.db*

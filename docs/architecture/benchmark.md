@@ -56,6 +56,14 @@ tags: [python, budget, small]
    for find-a-car (listing input → expected JSON: verifiable without an
    LLM).
 
+### Protocol detail: the fix's tests arrive after the tool
+
+The tests that prove a fix usually land **in the fix commit**. So a task
+lists them in `test_files_from_fix`; the runner checks out the worktree at
+`commit_before` (the model cannot see them), runs `setup` and the tool,
+**then** `git checkout <commit_fix> -- <those files>` and `verify`. Same
+protocol as SWE-bench's test patch.
+
 ### The runner (`brain bench run`)
 
 For each task: clean worktree at `commit_before` → launch the tool

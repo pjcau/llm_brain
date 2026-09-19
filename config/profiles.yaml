@@ -1,0 +1,34 @@
+# One profile per client. No secrets here: the OpenRouter key of a profile is
+# read from the env var OPENROUTER_KEY_<PROFILE> (e.g. OPENROUTER_KEY_DEV).
+# Budgets: docs/architecture/budget.md
+profiles:
+  - name: dev
+    description: Claude Code + aider on the laptop
+    tier: fast
+    daily_limit_usd: 3.0
+    monthly_soft_usd: 30.0
+    l2_cache: off
+  - name: ago
+    description: agent-orchestrator as a client
+    tier: fast
+    daily_limit_usd: 1.0
+    monthly_soft_usd: 5.0
+    l2_cache: off
+  - name: benchmark
+    description: nightly benchmark runner, never at the expense of dev
+    tier: fast
+    daily_limit_usd: 0.5
+    monthly_soft_usd: 5.0
+    l2_cache: off
+  - name: assistant
+    description: local assistant app (chat, RAG)
+    tier: fast
+    daily_limit_usd: 0.2
+    monthly_soft_usd: 3.0
+    l2_cache: exact
+  - name: car
+    description: find-a-car second hand (valuation, extraction)
+    tier: fast
+    daily_limit_usd: 0.2
+    monthly_soft_usd: 3.0
+    l2_cache: exact

@@ -1,0 +1,13 @@
+# Replace the host with your subdomain (or brain.<ip>.sslip.io in Phase 0/1).
+brain.example.com {
+    encode zstd gzip
+    @api path /v1/* /health
+    handle @api {
+        reverse_proxy 127.0.0.1:8080 {
+            flush_interval -1   # SSE: never buffer
+        }
+    }
+    handle {
+        respond 404
+    }
+}

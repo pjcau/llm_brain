@@ -4,6 +4,7 @@ const sidebars = {
   docs: [
     'index',
     'changelog',
+    'phase-0',
     {
       type: 'category', label: 'Analysis', collapsed: false,
       items: ['analysis/costs-90-10', 'analysis/hosting-costs', 'analysis/stack', 'analysis/agent-orchestrator', 'analysis/litellm', 'analysis/cli', 'analysis/tool-landscape'],
