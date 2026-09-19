@@ -1,0 +1,30 @@
+flowchart TB
+    subgraph L0["L0 — Client (not ours)"]
+        L0a["Claude Code: session context, files read"]
+        L0b["aider: repo map, chat history"]
+    end
+
+    subgraph L2["L2 — Response cache (gateway, llm_brain)"]
+        L2a["Exact match: hash(normalized messages + model + tools) → response, TTL"]
+        L2b["Semantic (optional, apps only): query embedding → similar response"]
+        L2n["⚠ OFF for coding agents: files change, response goes stale"]
+    end
+
+    subgraph L1["L1 — Provider prompt cache (translated by llm_brain)"]
+        L1a["Anthropic: explicit cache_control on blocks"]
+        L1b["OpenAI: automatic prefix cache"]
+        L1c["Gemini: explicit context caching, with TTL and storage cost"]
+        L1d["DeepSeek: automatic on-disk context cache"]
+        L1e["OpenRouter: pass-through to the underlying provider"]
+        L1n["Rule: stable prefix → system + tools + skills FIRST, variable content AFTER"]
+    end
+
+    subgraph L3["L3 — Application cache (the app's domain)"]
+        L3a["second-hand market: listing classification by id"]
+        L3b["find-a-car: car valuation by (model, year, km)"]
+        L3c["assistant: FAQ answers"]
+    end
+
+    REQ["Request"] --> L0 --> L2
+    L2 -- miss --> L1 --> PROV["Provider"]
+    L3 -. "the app decides before calling llm_brain" .-> REQ

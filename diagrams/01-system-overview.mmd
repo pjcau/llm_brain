@@ -1,0 +1,40 @@
+flowchart LR
+    subgraph CLIENTS["Clients (no client changes)"]
+        CC["Claude Code<br/>ANTHROPIC_BASE_URL"]
+        AID["aider<br/>OPENAI_API_BASE"]
+        OC["OpenCode / Cline / Continue"]
+        APPS["GitHub apps<br/>assistant · find-a-car (first) · second-hand market (later)"]
+        AGO["agent-orchestrator<br/>(client: providers/openai.py with base_url)"]
+    end
+
+    subgraph BRAIN["llm_brain — single backend (FastAPI)"]
+        direction TB
+        EP_A["/v1/messages<br/>(Anthropic dialect)"]
+        EP_O["/v1/chat/completions<br/>(OpenAI dialect)"]
+        TR["Translator<br/>single internal format<br/>(messages, tools, stream, cache hints)"]
+        POL["Policy / Profiles<br/>per client: default tier, budget, cache"]
+        RT["Tier router<br/>fast · reasoning · premium<br/>+ escalation on failure"]
+        CACHE["Cache manager<br/>L1 provider prompt cache<br/>L2 gateway response cache"]
+        USG["Usage / Budget<br/>SQLite · daily and monthly limit per profile"]
+        PV["providers/<br/>openrouter (today) · openai-compat · local (later)"]
+    end
+
+    subgraph UPSTREAM["Upstream providers"]
+        OR["OpenRouter<br/>e.g. bonsai-2-27b (int4)"]
+        GG["Google Gemini"]
+        DS["DeepSeek"]
+        OL["Ollama / llama.cpp (local GPU)<br/>e.g. bonsai-2-27b GGUF 7 GB — same model"]
+        AN["Anthropic (premium tier only)"]
+    end
+
+    CC --> EP_A
+    AID --> EP_O
+    OC --> EP_O
+    APPS --> EP_O
+    AGO --> EP_O
+    EP_A --> TR
+    EP_O --> TR
+    TR --> POL --> RT
+    RT --> CACHE --> PV
+    RT -.-> USG
+    PV --> OR & GG & DS & OL & AN

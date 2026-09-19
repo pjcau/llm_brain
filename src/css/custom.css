@@ -1,0 +1,104 @@
+/* llm_brain theme — indigo → cyan, dark slate surfaces */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  --ifm-font-family-base: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --ifm-font-family-monospace: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --ifm-color-primary: #4f46e5;
+  --ifm-color-primary-dark: #4338ca;
+  --ifm-color-primary-darker: #3f34c4;
+  --ifm-color-primary-darkest: #312e81;
+  --ifm-color-primary-light: #6366f1;
+  --ifm-color-primary-lighter: #7c7ff5;
+  --ifm-color-primary-lightest: #a5b4fc;
+  --brain-accent: #06b6d4;
+  --brain-surface: #f8fafc;
+  --brain-border: #e2e8f0;
+  --ifm-code-font-size: 90%;
+  --ifm-heading-font-weight: 700;
+  --ifm-navbar-shadow: 0 1px 0 var(--brain-border);
+  --ifm-table-border-color: var(--brain-border);
+  --ifm-table-stripe-background: #f1f5f9;
+  --docusaurus-highlighted-code-line-bg: rgba(99, 102, 241, 0.12);
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #818cf8;
+  --ifm-color-primary-dark: #6366f1;
+  --ifm-color-primary-darker: #4f46e5;
+  --ifm-color-primary-darkest: #4338ca;
+  --ifm-color-primary-light: #a5b4fc;
+  --ifm-color-primary-lighter: #c7d2fe;
+  --ifm-color-primary-lightest: #e0e7ff;
+  --brain-accent: #22d3ee;
+  --brain-surface: #0f172a;
+  --brain-border: #1e293b;
+  --ifm-background-color: #0b1120;
+  --ifm-background-surface-color: #0f172a;
+  --ifm-navbar-background-color: #0f172a;
+  --ifm-footer-background-color: #0b1120;
+  --ifm-table-stripe-background: #111a2e;
+  --docusaurus-highlighted-code-line-bg: rgba(129, 140, 248, 0.16);
+}
+
+/* navbar: gradient brand text next to the logo */
+.navbar__logo { height: 30px; }
+.navbar__title {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  background: linear-gradient(90deg, var(--ifm-color-primary), var(--brain-accent));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* headings */
+.markdown h1 { font-size: 2.1rem; letter-spacing: -0.02em; }
+.markdown h2 {
+  font-size: 1.45rem;
+  margin-top: 2.2rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--brain-border);
+}
+.markdown h3 { font-size: 1.15rem; }
+
+/* tables: dense, readable, striped */
+.markdown table { display: table; width: 100%; font-size: 0.92rem; }
+.markdown table th {
+  background: var(--brain-surface);
+  text-align: left;
+  font-weight: 600;
+}
+.markdown table td, .markdown table th { padding: 0.45rem 0.7rem; vertical-align: top; }
+.markdown table tr:nth-child(2n) { background: var(--ifm-table-stripe-background); }
+
+/* inline code */
+.markdown code {
+  border: 1px solid var(--brain-border);
+  background: var(--brain-surface);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+[data-theme='dark'] .markdown code { background: #111a2e; }
+
+/* diagrams: framed, with breathing room */
+.docusaurus-mermaid-container {
+  margin: 1.5rem 0;
+  padding: 1rem;
+  border: 1px solid var(--brain-border);
+  border-radius: 10px;
+  background: var(--brain-surface);
+  overflow-x: auto;
+}
+
+/* sidebar: accent bar on the active item */
+.menu__link--active:not(.menu__link--sublist) {
+  box-shadow: inset 3px 0 0 var(--brain-accent);
+  border-radius: 0 6px 6px 0;
+}
+
+/* admonitions: tone down, align with palette */
+.theme-admonition { border-left-width: 4px; border-radius: 8px; }
+
+/* footer */
+.footer { border-top: 1px solid var(--brain-border); font-size: 0.9rem; }

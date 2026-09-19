@@ -1,0 +1,30 @@
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant CC as Claude Code (CLI, local)
+    participant H as Hooks / Skills / MCP (local)
+    participant EP as llm_brain /v1/messages
+    participant TR as Translator
+    participant RT as Tier router
+    participant C as Cache
+    participant P as Provider (fast)
+    participant R as Provider (reasoning)
+
+    U->>CC: prompt
+    CC->>H: UserPromptSubmit hook, skill match (all local)
+    H-->>CC: enriched context (skill md, CLAUDE.md)
+    CC->>EP: POST /v1/messages<br/>model=claude-*, system[cache_control], tools[], stream=true
+    EP->>TR: normalize (Anthropic → internal format)
+    TR->>RT: request + client profile "claude-code"
+    RT->>RT: model claude-* → tier (fast by default)
+    RT->>C: L2 lookup (request hash) — miss for coding
+    C->>P: call with cache hint translated for the provider
+    P-->>TR: stream (provider-format chunks)
+    TR-->>CC: Anthropic SSE (message_start, content_block_delta, tool_use…)
+    CC->>H: PreToolUse hook → runs tool locally → PostToolUse hook
+    CC->>EP: POST /v1/messages (tool_result)
+    Note over RT,R: Escalation: if the client signals failure<br/>(tests/lint KO, or explicit /model reasoning)<br/>the router sends it to the reasoning tier
+    RT->>R: same request, reasoning tier
+    R-->>CC: response via TR
+    CC->>H: Stop hook
+    RT-->>EP: usage (tokens, cache hits, cost) → dashboard

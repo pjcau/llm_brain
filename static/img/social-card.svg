@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6366F1"/><stop offset="1" stop-color="#06B6D4"/></linearGradient></defs>
+  <rect width="1200" height="630" fill="#0F172A"/>
+  <g transform="translate(120,175) scale(2.2)">
+    <path d="M64 14c-9 0-16 5-19 12-8 0-15 6-16 14-7 2-12 8-12 16 0 6 3 11 8 14-1 3-1 5-1 8 0 10 8 18 18 18 4 0 8-1 11-4 3 4 7 6 11 6s8-2 11-6c3 3 7 4 11 4 10 0 18-8 18-18 0-3 0-5-1-8 5-3 8-8 8-14 0-8-5-14-12-16-1-8-8-14-16-14-3-7-10-12-19-12z" fill="none" stroke="url(#g)" stroke-width="5" stroke-linejoin="round"/>
+    <g fill="none" stroke="url(#g)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><path d="M30 44h14l8 8h12"/><path d="M26 66h20l6 -6h12"/><path d="M34 86h12l8 -8h10"/><path d="M98 44H84l-8 8H64"/><path d="M102 66H82l-6 -6H64"/><path d="M94 86H82l-8 -8H64"/></g>
+    <circle cx="64" cy="60" r="9" fill="#0F172A" stroke="url(#g)" stroke-width="4"/><circle cx="64" cy="60" r="3.5" fill="#06B6D4"/>
+  </g>
+  <text x="460" y="290" font-family="Inter, system-ui, sans-serif" font-size="96" font-weight="700" fill="#F8FAFC">llm_brain</text>
+  <text x="462" y="350" font-family="Inter, system-ui, sans-serif" font-size="34" fill="#94A3B8">One LLM backend for every app and CLI.</text>
+  <text x="462" y="400" font-family="Inter, system-ui, sans-serif" font-size="34" fill="#94A3B8">Budget-first. Cheap models today, own GPU tomorrow.</text>
+</svg>
