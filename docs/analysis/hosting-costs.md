@@ -172,6 +172,53 @@ renaming later is only a `base_url` change in the clients.
 Recommendation: use a subdomain if a domain exists; otherwise start on
 sslip.io and buy the domain together with the first public app.
 
+## Choosing on service quality, performance and expandability (not on where the apps go)
+
+The apps may end up anywhere, so the location of the apps cannot be the
+criterion. Comparing Hetzner Cloud and AWS Lightsail (with EC2 as its
+growth path) on what matters for a single Rust service. Figures are
+indicative from the providers' public docs; verify before buying.
+
+| Criterion | Hetzner Cloud (CAX/CX/CCX) | AWS Lightsail → EC2 |
+|-----------|----------------------------|---------------------|
+| **CPU performance** | CAX = Ampere Altra ARM, CX = shared x86, CCX = **dedicated vCPU** from ~€13; no sustained-use throttling on shared tiers in practice | Lightsail $5 is **burstable**: a low baseline with credits; sustained CPU gets throttled. Fine for an idle proxy, not for compute |
+| **Network** | 20 TB/month included, then ~€1/TB; 1–10 Gbit ports | 1 TB included, then **$0.09/GB** (= $90/TB). The single biggest cost trap if traffic ever grows |
+| **Disk** | NVMe local; Volumes (block) attachable | SSD; EBS-class on EC2 |
+| **Vertical scaling** | **in-place rescale** in minutes (CAX11 → CAX21 8 GB ≈ €7, CAX31 16 GB ≈ €13) | no in-place resize on Lightsail: snapshot → new larger instance → re-point DNS; or graduate to EC2 |
+| **Horizontal / platform scaling** | Load Balancer (~€6), private networks, firewalls, Object Storage (S3-compatible); **no managed database** | the whole AWS catalogue next door: managed Postgres/MySQL, S3, SQS, IAM, CloudWatch, multi-AZ, multi-region |
+| **Backups / snapshots** | automated backups at +20% of the instance price; snapshots per GB | automatic snapshots included on most bundles; EBS snapshots on EC2 |
+| **Reliability / SLA** | solid, single-region by design; no SLA credits comparable to AWS | AZ/region SLAs, mature incident handling; the strongest option if uptime guarantees matter |
+| **DDoS / edge** | basic network protection included | AWS Shield Standard included; CloudFront/WAF available |
+| **Data location** | Germany / Finland (EU), plus US and Singapore | eu-central-1 / eu-west-1 (EU) and everywhere else |
+| **Support** | ticket-based, competent, no paid tiers to speak of | paid support tiers (Developer $29+/month) if ever needed |
+| **Pricing predictability** | flat, few metered items | flat on Lightsail; metered on EC2 (IPv4, EBS, egress, snapshots) |
+| **Lock-in** | none: a VPS is a VPS | low on Lightsail, grows as you adopt managed services |
+
+### What this means for llm_brain specifically
+
+llm_brain is, by design, **one static binary + one SQLite file + Caddy**,
+single instance, HA explicitly out of scope until usage data says
+otherwise. On that shape:
+
+- The things that would make it grow — **RAM** (in-process embeddings for
+  the semantic cache) and **egress** (more clients, bigger streams) — are
+  exactly where Hetzner is 3–20× cheaper and scales in place.
+- The things AWS is better at — managed databases, multi-AZ, IAM,
+  queues — are not used by this architecture. They become relevant only
+  at the HA step, which is an architecture change anyway (managed
+  Postgres, two instances).
+- Raw performance is a non-issue for both (model time dominates), but
+  Lightsail's burstable CPU is the weaker of the two under any sustained
+  load, e.g. the nightly benchmark running dozens of `verify` commands.
+
+**Verdict on these criteria: Hetzner, CAX11 now, CAX21/31 or a CCX
+dedicated tier when the semantic cache or the benchmark need it.** AWS
+is the *graduation* path, not the starting point: if llm_brain ever
+needs HA or the AWS ecosystem, the same binary moves with `scp`, and the
+SQLite → managed Postgres change is the real work, wherever it happens.
+If uptime guarantees with SLA credits were a requirement today, the
+answer would flip to AWS — they aren't.
+
 ## When to reconsider
 
 - If an app exceeds ~1 req/s sustained (30× today): consider 2 dedicated
