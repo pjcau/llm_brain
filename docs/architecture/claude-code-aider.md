@@ -52,7 +52,7 @@ sequenceDiagram
 | CLAUDE.md, slash commands, permissions | Client-side |
 | MCP servers | Tools run locally; only the schema reaches the model |
 | Subagents | Just more HTTP requests |
-| [claude-kit](https://github.com/pjcau/claude-kit) | Portable hooks/skills: no impact |
+| [claude-kit](https://github.com/pjcau/claude-kit) (submodule `.claude-kit/`) | Portable hooks/skills/agents: no impact, reused as-is |
 
 ### Depends on the translator (if wrong, it breaks)
 

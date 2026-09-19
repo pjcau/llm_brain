@@ -19,10 +19,11 @@ verified on the code (clone of 2026-09-19).
 Its `providers/openrouter.py` becomes redundant: only llm_brain sees
 OpenRouter.
 
-## What to copy into llm_brain (don't depend on it)
+## What to port into llm_brain (don't depend on it)
 
-Standalone means standalone: the useful modules are copied and adapted,
-the package is not imported. They are small.
+Standalone means standalone — and llm_brain is [in Rust](./stack.md), so
+the useful modules are **ported**, not imported. They are small; the
+value is in their data model and thresholds, not in the Python.
 
 | Module | Lines | What it gives | What's missing |
 |--------|-------|---------------|----------------|

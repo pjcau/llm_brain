@@ -1,0 +1,9 @@
+[workspace]
+resolver = "3"
+members = ["tools/sync-diagrams"]
+# crates/brain is added when implementation starts (see docs/analysis/stack.md)
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/pjcau/llm_brain"

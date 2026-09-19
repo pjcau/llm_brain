@@ -18,3 +18,5 @@ Layout:
 - `diagrams/` — Mermaid sources, the single source of the diagrams; `scripts/sync-diagrams.py` copies them into the pages
 - the iteration log is `docs/changelog.md`, the decisions are in `docs/decisions.md`
 - `.github/workflows/deploy.yml` — builds and publishes to GitHub Pages on every push to `main`
+- `tools/sync-diagrams/` — Rust helper behind `npm run sync-diagrams`
+- `.claude-kit/` — git submodule with Claude Code skills, agents and hooks (`git submodule update --init`)

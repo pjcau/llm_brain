@@ -5,7 +5,7 @@ title: Authentication flow (client ↔ llm_brain)
 # Authentication flow: who can hold credentials and how they are used
 
 Yes, this pattern has to be **built**, but it's small: one table, one
-middleware, four CLI commands. About 150–200 lines of Python. This page
+axum middleware, four `clap` subcommands. A few hundred lines of Rust. This page
 describes the exact interactions and what guarantees that **only who you
 decide** can hold and use a key.
 

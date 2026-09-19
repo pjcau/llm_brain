@@ -24,7 +24,7 @@ Estimated from the [budgets per profile](../architecture/budget.md) and the
 The conclusion that decides everything: **traffic is negligible**. 2.5
 GB/month against allowances of 1 TB (Lightsail) or 20 TB (Hetzner):
 bandwidth costs zero everywhere. llm_brain is an I/O-bound proxy: CPU
-almost always idle, RAM 150–300 MB (FastAPI + SQLite + Litestream), Caddy
+almost always idle, RAM ~20–40 MB as a Rust binary (+ Litestream), Caddy
 another ~50 MB.
 
 Even at **10×** (30 000 req/day) the machines below stay the same.
@@ -59,9 +59,9 @@ Notes:
 | **Model time** (0.5–30 s) | dominates everything | no |
 | Hop VPS → OpenRouter (Cloudflare edge, US upstream) | +100–150 ms TTFB per request from the EU | no (same anywhere in the EU) |
 | Hop client → llm_brain | +10–30 ms in the EU; ~0 if app and llm_brain share a private network | **yes: put them together** |
-| Streaming pass-through (FastAPI/httpx) | < 5 ms if not buffered | no |
+| Streaming pass-through (axum/reqwest) | < 5 ms if not buffered | no |
 | SQLite WAL, one write per request | < 1 ms; handles hundreds of req/s, we're at 0.03 | no |
-| Concurrency (uvicorn async, 1 worker) | 100+ simultaneous streams on 1 vCPU | no |
+| Concurrency (tokio, one process) | thousands of simultaneous streams on 1 vCPU | no |
 | Burstable CPU (t4g/t3 credits) | I/O-bound: credits are not consumed | no |
 | **In-process** semantic L2 cache (local embeddings) | +0.5–1 GB RAM | yes: 4 GB (Hetzner) or t4g.medium; or embeddings via OpenRouter and RAM unchanged |
 

@@ -62,7 +62,7 @@ flowchart LR
 | **Tier router** | `brain/*` and `claude-*` aliases → tier → (provider, model) from `tiers.yaml` | routing by alias; no classifier in Phase 1 |
 | **Escalation** | failure signal → retry on a higher tier | v2 |
 | **Cache manager** | L1 (provider prompt cache, translated) + L2 (response cache) | [Cache](./cache.md) |
-| **Usage** | tokens, cache hits, cost, per profile, daily and monthly | `usage.py` copied from agent-orchestrator + SQLite |
+| **Usage** | tokens, cache hits, cost, per profile, daily and monthly | `usage.py` ported to `usage.rs` + SQLite |
 
 ## Translator: the main technical risk (deferred)
 

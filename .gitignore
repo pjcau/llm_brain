@@ -22,3 +22,6 @@ yarn-error.log*
 # Secrets (never commit)
 .env
 *.enc.yaml.dec
+
+# Rust
+/target

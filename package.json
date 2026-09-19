@@ -12,7 +12,7 @@
     "serve": "docusaurus serve",
     "write-translations": "docusaurus write-translations",
     "write-heading-ids": "docusaurus write-heading-ids",
-    "sync-diagrams": "python3 scripts/sync-diagrams.py"
+    "sync-diagrams": "cargo run -q -p sync-diagrams"
   },
   "dependencies": {
     "@docusaurus/core": "3.10.2",

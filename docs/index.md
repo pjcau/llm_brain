@@ -66,7 +66,10 @@ the full reasoning. Updated at every iteration: see the
   concrete models are replaceable config. → [Costs](./analysis/costs-90-10.md#tiers-not-models)
 - **Cost is driven by volume, not price per token.** A coding agent burns
   10–50× a chat; the tool, prompt caching and trimming matter most. → [Costs](./analysis/costs-90-10.md#the-real-cost)
-- **Four modules get copied from agent-orchestrator** (usage, cache,
+- **Everything in Rust.** One static binary (axum + tokio + reqwest +
+  rusqlite + clap), ~20–40 MB of RAM on the VPS, no runtime to patch;
+  helpers too. → [Stack](./analysis/stack.md)
+- **Four modules get ported from agent-orchestrator** (usage, cache,
   openrouter, evaluator); the two compatible endpoints must be written. → [agent-orchestrator](./analysis/agent-orchestrator.md)
 - **Measure before building**: a week on OpenRouter directly (it already
   speaks both dialects) to get real numbers; LiteLLM is not needed. → [Stack](./analysis/stack.md)
@@ -147,13 +150,13 @@ Details and exit criteria per phase → [Roadmap](./roadmap.md)
 
 ## Decisions
 
-Taken: standalone backend on a **VPS**, OpenRouter directly, budget (dev
-3 €/day), both CLIs, apps assistant + find-a-car first, translator and GPU
-deferred, no refresh tokens. Open: name/stack of the two apps, other repos
+Taken: standalone backend **in Rust** on a **VPS**, OpenRouter directly,
+budget (dev 3 €/day), both CLIs, apps assistant + find-a-car first,
+translator and GPU deferred, no refresh tokens, claude-kit as a submodule. Open: name/stack of the two apps, other repos
 with tests for the benchmark. → [Decisions](./decisions.md)
 
 ## Sources and reference repos
 
 - [agent-orchestrator](https://github.com/pjcau/agent-orchestrator) — becomes a client of llm_brain
-- [claude-kit](https://github.com/pjcau/claude-kit) — your portable hooks/skills, still valid
+- [claude-kit](https://github.com/pjcau/claude-kit) — your portable hooks/skills/agents, included as the `.claude-kit/` submodule
 - Landscape of alternative gateways and CLIs → [Tool landscape](./analysis/tool-landscape.md)

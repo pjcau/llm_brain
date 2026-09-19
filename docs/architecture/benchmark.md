@@ -46,7 +46,7 @@ tags: [python, budget, small]
 1. **agent-orchestrator**: 1692 tests, Python, rich git history. Extract
    the commits with "fix" in the message that also touch a test:
    `commit_before` = parent, `verify` = that test. First source, and the
-   easiest to automate (`bench/mine.py`).
+   easiest to automate (`brain bench mine`).
 2. **Real fixes made during work** with Claude Code/aider behind llm_brain:
    every test-verified fix becomes a task. This is the channel that grows
    the suite for free.
@@ -56,7 +56,7 @@ tags: [python, budget, small]
    for find-a-car (listing input → expected JSON: verifiable without an
    LLM).
 
-### The runner (`bench/run.py`)
+### The runner (`brain bench run`)
 
 For each task: clean worktree at `commit_before` → launch the tool
 headless (aider: `aider --message "$prompt" --yes`; Claude Code:
