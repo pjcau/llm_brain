@@ -149,6 +149,29 @@ and you want a single provider, **moving to Lightsail $5 is now
 penalty-free**: same binary, same Caddy, same Litestream (to S3). Revisit
 when the apps' cloud is chosen, not before.
 
+## Hetzner CAX11 or Lightsail $5? And is a domain needed?
+
+The two are interchangeable at the same price; the binary, Caddy and
+Litestream are identical on both. Pick by **one provider** (Lightsail if
+the apps land on AWS) or **free headroom** (Hetzner).
+
+A **hostname** is needed, a **purchased domain is not**: Caddy's automatic
+HTTPS uses Let's Encrypt, which issues certificates for names, not bare
+IPs.
+
+| Option | Cost | When |
+|--------|------|------|
+| **Subdomain of a domain you already own** (e.g. `brain.yourdomain.tld`) | 0 | if one exists (e.g. for JonnysPortal): one A record |
+| **sslip.io / nip.io** (`brain.1-2-3-4.sslip.io` resolves to the IP) | 0, zero setup | Phase 0–1: Caddy still gets a certificate; ugly, but it's a private API nobody has to remember |
+| **New domain** (`.dev`/`.com` at cost via Cloudflare Registrar or Porkbun) | ~€10/year | when find-a-car and market go public: the domain is for **the apps**, llm_brain becomes a subdomain |
+
+Not needed: Route53 ($0.50/month) or paid DNS — Cloudflare DNS or the
+registrar's DNS are free. Client keys don't depend on the hostname:
+renaming later is only a `base_url` change in the clients.
+
+Recommendation: use a subdomain if a domain exists; otherwise start on
+sslip.io and buy the domain together with the first public app.
+
 ## When to reconsider
 
 - If an app exceeds ~1 req/s sustained (30× today): consider 2 dedicated
