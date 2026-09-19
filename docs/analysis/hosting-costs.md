@@ -113,6 +113,42 @@ If a private network were ever needed (e.g. to expose nothing), the "same
 cloud" option remains valid and documented above: it's a change of
 hosting, not of architecture.
 
+## With everything in Rust: is the VPS still ahead of AWS?
+
+Rust changes the footprint, not the traffic: ~20–40 MB of RAM and a CPU
+that is idle at 0.03 req/s. That makes the **smallest tier viable
+everywhere**, and the comparison shifts:
+
+| Option | Fits a Rust binary? | Total/month | What you get |
+|--------|---------------------|-------------|--------------|
+| **Hetzner CAX11** (2 vCPU, 4 GB, 20 TB) | yes, 100× headroom | **~€4–5** | RAM and bandwidth you don't need, EU data location, no metered extras |
+| **AWS Lightsail $5** (2 vCPU, 0.5 GB, 20 GB, 1 TB, IPv4 included) | yes, comfortably (binary + Caddy + Litestream ≈ 100 MB) | **~$5 ≈ €4.6** | same AWS account/region as the apps, SSM free |
+| AWS EC2 **t4g.nano** (0.5 GB) | yes | $3.5 + EBS ~$1 + IPv4 $3.7 ≈ **$8** | the paid IPv4 makes it pricier than Lightsail |
+| AWS **Lambda + Function URL** (Rust, response streaming) | yes: cold start ~20 ms, streaming up to 15 min | ≈ **$2–3** at 3 000 req/day × ~10 s × 128 MB | cheapest, **but** no local SQLite: budget/keys/usage move to DynamoDB, Litestream and the "one file to back up" story go away, local dev and `brain bench` get harder |
+
+What Rust changed:
+- **Cost**: Hetzner vs Lightsail is now a coin flip (€4–5 vs ≈ €4.6). With
+  Python the 0.5 GB tiers were too tight; now they aren't.
+- **Serverless became possible** (Lambda + DynamoDB), and it is the only
+  option that is actually cheaper. It is also the only one that changes
+  the architecture ([auth topology](../architecture/auth-topology.md):
+  single instance, SQLite, Litestream). Not worth it at ≈ €2/month of
+  savings.
+- **Operations are identical everywhere**: one static binary, `scp` +
+  systemd unit, Caddy in front. No runtime, no container needed.
+
+What did not change:
+- Performance: model time dominates; nothing here is measurable.
+- Traffic: negligible on every plan.
+
+**Verdict**: the decision stands — VPS — but it is no longer a cost
+decision. The remaining reasons are headroom for free (semantic cache
+embeddings in-process would need > 0.5 GB), no metered surprises, and one
+fewer AWS account to think about. If find-a-car and market end up on AWS
+and you want a single provider, **moving to Lightsail $5 is now
+penalty-free**: same binary, same Caddy, same Litestream (to S3). Revisit
+when the apps' cloud is chosen, not before.
+
 ## When to reconsider
 
 - If an app exceeds ~1 req/s sustained (30× today): consider 2 dedicated
