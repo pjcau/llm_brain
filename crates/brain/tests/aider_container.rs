@@ -49,28 +49,26 @@ async fn aider_in_container_hits_the_mock_endpoint_with_our_contract() {
         .await
         .expect("start aider container (build docker/aider-test.Dockerfile first)");
 
-    // a git repo inside the container, as `brain bench` would prepare a worktree
-    let setup = ExecCommand::new([
-        "sh",
-        "-c",
-        "git init -q /work/repo && cd /work/repo && echo bug > README.md && git add . && git commit -qm before",
-    ]);
-    container.exec(setup).await.expect("git setup");
+    // a git repo inside the container, as `brain bench` would prepare a worktree.
+    // `exec` returns as soon as the command starts: drain the output to wait for it.
+    let setup = "git init -q /work/repo && cd /work/repo && echo bug > README.md && git add . && git commit -qm before";
+    let (code, out) = exec_wait(&container, setup).await;
+    assert_eq!(code, Some(0), "git setup failed: {out}");
 
     // Same env/args as bench::tool::invocation(Tool::Aider, …), pointed at the mock.
     let cmd = format!(
         "cd /work/repo && OPENAI_API_BASE=http://127.0.0.1:{port} OPENAI_API_KEY=sk-bench \
          aider --model openai/prism-ml/ternary-bonsai-2-27b --message 'create fixed.txt' \
-         --yes-always --no-show-model-warnings --no-check-update --no-analytics --no-auto-commits --no-stream
-         > /work/aider.log 2>&1; echo exit=$? >> /work/aider.log; tail -20 /work/aider.log"
+         --yes-always --no-show-model-warnings --no-check-update --no-analytics \
+         --no-auto-commits --no-stream && test -f fixed.txt"
     );
-    let mut exec = container
-        .exec(ExecCommand::new(["sh", "-c", &cmd]))
-        .await
-        .expect("run aider");
-    let out = exec.stdout_to_vec().await.unwrap_or_default();
-    let out = String::from_utf8_lossy(&out);
-    eprintln!("aider output:\n{out}");
+    let (code, out) = exec_wait(&container, &cmd).await;
+    eprintln!("aider exec exit={code:?}\n{out}");
+    assert_eq!(
+        code,
+        Some(0),
+        "aider failed or did not apply the edit:\n{out}"
+    );
 
     let requests = server.received_requests().await.unwrap_or_default();
     let hit = requests
@@ -87,4 +85,27 @@ async fn aider_in_container_hits_the_mock_endpoint_with_our_contract() {
         text.contains("create fixed.txt"),
         "prompt forwarded: {text}"
     );
+}
+
+/// Runs `sh -c cmd` in the container and waits for completion by draining
+/// stdout+stderr; returns the exit code and the combined output.
+async fn exec_wait(
+    container: &testcontainers::ContainerAsync<GenericImage>,
+    cmd: &str,
+) -> (Option<i64>, String) {
+    let mut exec = container
+        .exec(ExecCommand::new(["sh", "-c", cmd]))
+        .await
+        .expect("exec");
+    let stdout = exec.stdout_to_vec().await.unwrap_or_default();
+    let stderr = exec.stderr_to_vec().await.unwrap_or_default();
+    let code = exec.exit_code().await.expect("inspect exec");
+    (
+        code,
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        ),
+    )
 }
