@@ -39,6 +39,13 @@ pub struct Tier {
     pub input_usd_per_m: f64,
     #[serde(default)]
     pub output_usd_per_m: f64,
+    /// Policy cap for `max_tokens` on this tier (facts come from the catalog).
+    #[serde(default = "default_max_output")]
+    pub max_output_tokens: u64,
+}
+
+fn default_max_output() -> u64 {
+    16_384
 }
 
 #[derive(Debug, Clone, Deserialize)]

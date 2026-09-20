@@ -179,15 +179,18 @@ If aider is installed on the host instead of Docker, the equivalent is
 
 Same tools, base URL = the VPS, key = a client key issued on the server.
 `BRAIN_BASE_URL` and `BRAIN_DEV_KEY` live in the git-ignored
-`deploy/server.local.env`, sourced by `~/.bashrc`:
+`deploy/server.local.env`, sourced by `~/.bashrc`. `brain setup aider
+--proxy` prints the function and the conventions file:
 
 ```bash
 px-aider() {
   OPENAI_API_BASE="$BRAIN_BASE_URL/v1" OPENAI_API_KEY="$BRAIN_DEV_KEY" \
   aider --architect --model openai/brain/reasoning --editor-model openai/brain/fast \
     --model-metadata-file "$HOME/.local/share/llm_brain/aider-model-metadata.json" \
-    --chat-history-file "$HOME/.local/share/llm_brain/aider-chat.md" \
-    --llm-history-file "$HOME/.local/share/llm_brain/aider-llm.history" "$@"
+    --llm-history-file "$HOME/.local/share/llm_brain/aider-llm.history" \
+    --yes-always --auto-accept-architect --auto-commits --show-diffs --restore-chat-history \
+    --no-suggest-shell-commands --no-check-update --no-show-model-warnings --notifications \
+    --read "$HOME/.local/share/llm_brain/aider-conventions.md" "$@"
 }
 px-claude() {
   ANTHROPIC_BASE_URL="$BRAIN_BASE_URL" ANTHROPIC_AUTH_TOKEN="$BRAIN_DEV_KEY" \
@@ -200,6 +203,26 @@ px-claude() {
 proxy adds the `models[]` fallback itself, so no settings file is needed
 for that (the aider metadata file has entries for the aliases so costs
 display).
+
+What the flags do, and why ("make it behave like Claude Code"):
+
+| Flag | Effect |
+|------|--------|
+| `--yes-always`, `--auto-accept-architect` | no confirmations; in architect mode the proposal is applied without the "Edit the files?" prompt (the reason edits "were announced but never appeared") |
+| `--auto-commits`, `--show-diffs` | every applied edit is committed with a conventional message, and the diff is printed |
+| `--restore-chat-history` | resumes the previous conversation of **that repo** (`.aider.chat.history.md`, aider's default location, git-ignored by aider); `brain events ingest` scans the repos under `BRAIN_AIDER_ROOTS` (default `~/Documents/myProjects`) to keep the board fed |
+| `--read …/aider-conventions.md` | standing rules loaded every session (small steps, tests with the change, conventional commits, no secrets, plain-text replies — the last one stops bonsai from emitting fake `<tool_call>` markup as architect) |
+| `--no-suggest-shell-commands` | with `--yes-always` on, aider must not auto-run commands the model suggests |
+
+What aider cannot do: accept typing while it is generating. Its chat is
+synchronous; that difference from Claude Code stays.
+
+The proxy also caps `max_tokens` per request to the smaller of the
+provider's maximum (from the OpenRouter catalog, refreshed hourly) and the
+tier's `max_output_tokens` in `config/tiers.yaml` (16 384 for `fast`,
+32 768 for `reasoning`): the catalog shows deepseek-v4-flash allows 384 000
+output tokens, which is how one request produced 89 000 of them.
+`brain models` prints those facts per tier.
 
 ### Claude Code via `settings.json` instead of a function
 
@@ -310,7 +333,8 @@ and by the container test in CI.
 | `brain keys create --profile P --name N [--expires DATE] [--ip CIDRs]` / `keys list` / `keys revoke` | the SQLite file (run on the server) |
 | `brain usage snapshot` / `usage report [--days 7]` | `OPENROUTER_KEY_*` |
 | `brain setup claude-code [--profile dev] [--docker IMAGE]` | — |
-| `brain setup aider [--profile dev] [--docker IMAGE]` | — |
+| `brain setup aider [--profile dev] [--docker IMAGE] [--proxy]` | — |
+| `brain models` — tier models with context, provider max output, effective cap, prices from the OpenRouter catalog | network |
 | `brain events ingest [--aider-chat FILE] [--claude-projects DIR]` | the tools' logs |
 | `brain events report [--days 7]` | — |
 | `brain bench run --tool aider\|claude [--tier fast\|reasoning] [--docker IMAGE] [--only id]` — `--tier reasoning` runs aider in architect mode with the fast tier as editor; the settings file is passed if present | `OPENROUTER_KEY_BENCHMARK` |

@@ -8,6 +8,7 @@
 mod auth;
 mod bench;
 mod budget;
+mod catalog;
 mod config;
 mod dashboard;
 mod db;
@@ -56,6 +57,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: UsageCmd,
     },
+    /// Tier models with the facts OpenRouter publishes about them (context, max output, prices)
+    Models,
     /// Print client configuration
     Setup {
         #[command(subcommand)]
@@ -156,6 +159,9 @@ enum SetupCmd {
         /// Print a shell function that runs aider from this Docker image instead
         #[arg(long, value_name = "IMAGE")]
         docker: Option<String>,
+        /// Print the `px-aider` function (through the llm_brain proxy) and the conventions file
+        #[arg(long)]
+        proxy: bool,
     },
 }
 
@@ -368,6 +374,47 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Cmd::Models => {
+            let cat =
+                catalog::Catalog::fetch(&reqwest::Client::new(), &cli.openrouter_base).await?;
+            println!(
+                "{:<10} {:<36} {:>9} {:>9} {:>9} {:>8} {:>8} tools/reason",
+                "tier", "model", "context", "max_out", "cap", "in$/M", "out$/M"
+            );
+            for (name, t) in &cfg.tiers {
+                for (role, id) in [
+                    ("", t.model.as_deref()),
+                    ("  fallback", t.fallback.as_deref()),
+                ] {
+                    let Some(id) = id else { continue };
+                    match cat.get(id) {
+                        Some(i) => println!(
+                            "{:<10} {:<36} {:>9} {:>9} {:>9} {:>8.3} {:>8.3} {}/{}",
+                            format!("{name}{role}"),
+                            id,
+                            i.context_length
+                                .map(|v| v.to_string())
+                                .unwrap_or_else(|| "-".into()),
+                            i.max_completion_tokens
+                                .map(|v| v.to_string())
+                                .unwrap_or_else(|| "-".into()),
+                            catalog::output_cap(Some(i), Some(t.max_output_tokens))
+                                .map(|v| v.to_string())
+                                .unwrap_or_else(|| "-".into()),
+                            i.prompt_usd_per_m,
+                            i.completion_usd_per_m,
+                            i.supports_tools,
+                            i.supports_reasoning
+                        ),
+                        None => println!(
+                            "{:<10} {:<36} not in the OpenRouter catalog",
+                            format!("{name}{role}"),
+                            id
+                        ),
+                    }
+                }
+            }
+        }
         Cmd::Setup { cmd } => match cmd {
             SetupCmd::ClaudeCode {
                 profile,
@@ -382,10 +429,22 @@ async fn main() -> Result<()> {
             SetupCmd::Aider {
                 profile,
                 docker: Some(image),
+                ..
             } => print!("{}", setup::aider_docker(&cfg, &profile, &image)?),
+            SetupCmd::Aider { proxy: true, .. } => {
+                let data = setup::data_dir();
+                print!(
+                    "{}
+# {data}/aider-conventions.md
+{}",
+                    setup::aider_proxy(&cfg)?,
+                    setup::AIDER_CONVENTIONS
+                );
+            }
             SetupCmd::Aider {
                 profile,
                 docker: None,
+                ..
             } => {
                 let (env_block, meta) = setup::aider(&cfg, &profile)?;
                 print!(

@@ -11,6 +11,7 @@ pub mod usage_parse;
 
 use crate::auth::{self, ApiKey, Rejection};
 use crate::budget::{self, Action};
+use crate::catalog::{self, Catalog};
 use crate::config::Config;
 use crate::db::{Db, RequestRow};
 use axum::Router;
@@ -71,6 +72,7 @@ pub struct ProxyState {
     per_key: KeyedLimiter,
     per_user: KeyedLimiter,
     ip_fail: Mutex<HashMap<IpAddr, (u32, Instant)>>,
+    catalog: tokio::sync::RwLock<Option<Catalog>>,
 }
 
 impl ProxyState {
@@ -105,6 +107,7 @@ impl ProxyState {
             limits,
             key_cache: Mutex::new(HashMap::new()),
             ip_fail: Mutex::new(HashMap::new()),
+            catalog: tokio::sync::RwLock::new(None),
         })
     }
 }
@@ -377,6 +380,28 @@ impl ProxyState {
         budget::decide(profile, spent.0, spent.1, now)
     }
 
+    /// Facts about `model` from the OpenRouter catalog, refreshed hourly.
+    /// A failed refresh keeps the previous catalog; no catalog means no facts.
+    pub async fn model_info(&self, model: &str) -> Option<catalog::ModelInfo> {
+        let stale = self
+            .catalog
+            .read()
+            .await
+            .as_ref()
+            .is_none_or(|c| c.is_stale());
+        if stale {
+            match Catalog::fetch(&self.http, &self.upstream_base).await {
+                Ok(c) => *self.catalog.write().await = Some(c),
+                Err(e) => eprintln!("catalog refresh failed: {e:#}"),
+            }
+        }
+        self.catalog
+            .read()
+            .await
+            .as_ref()
+            .and_then(|c| c.get(model).cloned())
+    }
+
     fn record(&self, row: RequestRow) {
         let db_path = self.db_path.clone();
         tokio::task::spawn_blocking(move || {
@@ -598,6 +623,26 @@ async fn proxy(
     if let Some(obj) = json.as_object_mut() {
         obj.insert("model".into(), json!(resolved.model));
     }
+    // output cap: the provider's max (catalog) and the tier policy (config), whichever is smaller;
+    // applied when the client sends nothing or more than that (the 89k-token runaway of 2026-09-20)
+    let info = if is_count {
+        None
+    } else {
+        st.model_info(&resolved.model).await
+    };
+    let policy = st
+        .cfg
+        .tiers
+        .get(&resolved.tier)
+        .map(|t| t.max_output_tokens);
+    if let Some(cap) = catalog::output_cap(info.as_ref(), policy)
+        && sanitize::cap_max_tokens(&mut json, cap)
+    {
+        if !degraded.is_empty() {
+            degraded.push(' ');
+        }
+        degraded.push_str(&format!("max_tokens:{cap}"));
+    }
     match dialect {
         Dialect::OpenAi => sanitize::shape_openai(&mut json, &resolved.chain),
         Dialect::Anthropic => {
@@ -644,6 +689,7 @@ async fn proxy(
                 stream,
                 &degraded,
                 &st.cfg,
+                info.as_ref(),
             ));
             return error_response(
                 dialect,
@@ -678,13 +724,14 @@ async fn proxy(
         .and_then(|v| v.to_str().ok())
         .is_some_and(|c| c.starts_with("text/event-stream"));
     if is_sse && status.is_success() {
-        let (st2, profile2, key2, user2, resolved2, degraded2) = (
+        let (st2, profile2, key2, user2, resolved2, degraded2, info2) = (
             st.clone(),
             profile.clone(),
             key.clone(),
             user.clone(),
             resolved.clone(),
             degraded.clone(),
+            info.clone(),
         );
         let recorder: tap::Recorder = Box::new(move |usage, latency_ms, completed| {
             let mut d = degraded2;
@@ -706,6 +753,7 @@ async fn proxy(
                 true,
                 &d,
                 &st2.cfg,
+                info2.as_ref(),
             );
             r.latency_ms = latency_ms;
             st2.record(r);
@@ -750,6 +798,7 @@ async fn proxy(
             false,
             &degraded,
             &st.cfg,
+            info.as_ref(),
         ));
     }
     let mut resp = Response::new(Body::from(bytes));
@@ -802,13 +851,16 @@ fn row(
     stream: bool,
     degraded: &str,
     cfg: &Config,
+    info: Option<&catalog::ModelInfo>,
 ) -> RequestRow {
     let cost = usage.cost_usd.unwrap_or_else(|| {
         let t = cfg.tiers.get(&resolved.tier);
-        usage.estimate_cost(
-            t.map(|t| t.input_usd_per_m).unwrap_or(0.0),
-            t.map(|t| t.output_usd_per_m).unwrap_or(0.0),
-        )
+        let (inp, out) = match (t, info) {
+            (Some(t), _) if t.input_usd_per_m > 0.0 => (t.input_usd_per_m, t.output_usd_per_m),
+            (_, Some(i)) => (i.prompt_usd_per_m, i.completion_usd_per_m),
+            _ => (0.0, 0.0),
+        };
+        usage.estimate_cost(inp, out)
     });
     RequestRow {
         ts: Utc::now(),
@@ -857,6 +909,15 @@ mod tests {
             .unwrap(),
         );
         let upstream = MockServer::start().await;
+        // the catalog the proxy fetches on first use: provider maxima and prices
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
+                {"id": "deepseek/deepseek-v4-flash", "context_length": 1048576, "pricing": {"prompt": "0.000000036", "completion": "0.000000073"}, "top_provider": {"max_completion_tokens": 131072}, "supported_parameters": ["tools", "reasoning"]},
+                {"id": "prism-ml/ternary-bonsai-2-27b", "context_length": 262144, "pricing": {"prompt": "0.000000075", "completion": "0.0000005"}, "top_provider": {"max_completion_tokens": 8192}, "supported_parameters": ["tools", "reasoning"]}
+            ]})))
+            .mount(&upstream)
+            .await;
         let env = HashMap::from([("OPENROUTER_KEY_DEV".to_string(), "sk-or-dev".to_string())]); // car has no upstream key on purpose
         let state = ProxyState::new(cfg, db_path.clone(), upstream.uri(), &env, limits);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -876,6 +937,17 @@ mod tests {
             http: reqwest::Client::new(),
             _dir: dir,
         }
+    }
+
+    /// Requests the mock upstream received on `p` (ignores the catalog GET).
+    async fn posted(server: &MockServer, p: &str) -> Vec<wiremock::Request> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method == "POST" && r.url.path() == p)
+            .collect()
     }
 
     fn issue(db_path: &std::path::Path, profile: &str, name: &str, ip: &str) -> String {
@@ -1016,7 +1088,7 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), 200);
         // the upstream never saw a client key
-        for req in h.upstream.received_requests().await.unwrap() {
+        for req in posted(&h.upstream, "/chat/completions").await {
             let a = req.headers.get("authorization").unwrap().to_str().unwrap();
             assert_eq!(a, "Bearer sk-or-dev");
         }
@@ -1102,9 +1174,9 @@ mod tests {
         assert_eq!(text, sse, "bytes pass through unchanged");
         // the sanitizer removed the fields before forwarding
         let sent: Value =
-            serde_json::from_slice(&h.upstream.received_requests().await.unwrap()[0].body).unwrap();
+            serde_json::from_slice(&posted(&h.upstream, "/messages").await[0].body).unwrap();
         assert!(sent.get("thinking").is_none() && sent.get("context_management").is_none());
-        assert_eq!(sent["max_tokens"], 100);
+        assert_eq!(sent["max_tokens"], 100, "below the cap: untouched");
         let rows = wait_rows(&h.db_path, 1).await;
         assert_eq!(
             (rows[0].input_tokens, rows[0].output_tokens, rows[0].stream),
@@ -1170,10 +1242,8 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), 200);
         let sent: Value = serde_json::from_slice(
-            &h.upstream
-                .received_requests()
+            &posted(&h.upstream, "/chat/completions")
                 .await
-                .unwrap()
                 .last()
                 .unwrap()
                 .body,
@@ -1193,10 +1263,8 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), 200);
         let sent: Value = serde_json::from_slice(
-            &h.upstream
-                .received_requests()
+            &posted(&h.upstream, "/chat/completions")
                 .await
-                .unwrap()
                 .last()
                 .unwrap()
                 .body,
@@ -1304,6 +1372,49 @@ mod tests {
                 .await
                 .unwrap()
                 .contains("too many failed authentications")
+        );
+    }
+
+    #[tokio::test]
+    async fn max_tokens_is_capped_by_the_catalog_and_the_tier_policy() {
+        let h = harness(Limits::default()).await;
+        let key = issue(&h.db_path, "dev", "k", "");
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"choices": [], "usage": {}})),
+            )
+            .mount(&h.upstream)
+            .await;
+        // no max_tokens → tier policy (16384 default) since the catalog allows 131072
+        h.http
+            .post(format!("{}/v1/chat/completions", h.base))
+            .bearer_auth(&key)
+            .json(&json!({"model": "brain/fast"}))
+            .send()
+            .await
+            .unwrap();
+        // reasoning: the catalog says the provider stops at 8192 → that wins over the policy
+        h.http
+            .post(format!("{}/v1/chat/completions", h.base))
+            .bearer_auth(&key)
+            .json(&json!({"model": "brain/reasoning", "max_tokens": 100000}))
+            .send()
+            .await
+            .unwrap();
+        let sent = posted(&h.upstream, "/chat/completions").await;
+        let a: Value = serde_json::from_slice(&sent[0].body).unwrap();
+        let b: Value = serde_json::from_slice(&sent[1].body).unwrap();
+        assert_eq!(a["max_tokens"], 16384);
+        assert_eq!(b["max_tokens"], 8192);
+        let rows = wait_rows(&h.db_path, 2).await;
+        assert!(
+            rows.iter().any(|r| r.degraded.contains("max_tokens:16384")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter().any(|r| r.degraded.contains("max_tokens:8192")),
+            "{rows:?}"
         );
     }
 

@@ -396,7 +396,11 @@ pub fn render_report(cfg: &Config, stats: &[DailyStat]) -> String {
 
 /// Where the tools' logs live.
 pub struct IngestPaths {
+    /// The global aider history (Phase 0 setup), if any.
     pub aider_chat: std::path::PathBuf,
+    /// Directories scanned (3 levels deep) for per-repo `.aider.chat.history.md`
+    /// files, the default aider location that `--restore-chat-history` uses.
+    pub aider_roots: Vec<std::path::PathBuf>,
     /// Roots that contain `<project>/<session>.jsonl` (host and Docker HOMEs).
     pub claude_roots: Vec<std::path::PathBuf>,
 }
@@ -423,9 +427,23 @@ impl IngestPaths {
             claude_roots.push(std::path::PathBuf::from(extra));
         }
         claude_roots.push(docker_projects);
+        let aider_roots = env
+            .get("BRAIN_AIDER_ROOTS")
+            .map(|v| {
+                v.split(':')
+                    .filter(|s| !s.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                vec![std::path::PathBuf::from(format!(
+                    "{home}/Documents/myProjects"
+                ))]
+            });
         Self {
             aider_chat,
             claude_roots,
+            aider_roots,
         }
     }
 }
@@ -434,10 +452,23 @@ impl IngestPaths {
 /// events added. Missing or unreadable files are skipped with a note.
 pub fn ingest(db: &crate::db::Db, paths: &IngestPaths) -> Result<usize> {
     let mut total = 0;
-    if paths.aider_chat.is_file() {
-        let key = paths.aider_chat.to_string_lossy().to_string();
+    let mut aider_files = vec![paths.aider_chat.clone()];
+    for root in &paths.aider_roots {
+        find_aider_histories(root, 3, &mut aider_files);
+    }
+    for file in aider_files.iter().filter(|f| f.is_file()) {
+        let key = file.to_string_lossy().to_string();
         let (offset, hint) = db.ingest_state(&key)?;
-        let (text, new_offset) = read_from(&paths.aider_chat, offset)?;
+        let (text, new_offset) = match read_from(file, offset) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipping {}: {e:#}", file.display());
+                continue;
+            }
+        };
+        if new_offset == offset {
+            continue;
+        }
         let (ev, model) = parse_aider_chat(&text, &hint);
         total += db.insert_events(&ev)?;
         db.set_ingest_state(&key, new_offset, &model)?;
@@ -475,6 +506,34 @@ pub fn ingest(db: &crate::db::Db, paths: &IngestPaths) -> Result<usize> {
         db.set_ingest_state(&key, new_offset, "")?;
     }
     Ok(total)
+}
+
+/// Collects `.aider.chat.history.md` files under `dir`, `depth` levels deep,
+/// skipping hidden and dependency directories.
+fn find_aider_histories(dir: &std::path::Path, depth: u32, out: &mut Vec<std::path::PathBuf>) {
+    let candidate = dir.join(".aider.chat.history.md");
+    if candidate.is_file() {
+        out.push(candidate);
+    }
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if p.is_dir()
+            && !name.starts_with('.')
+            && name != "node_modules"
+            && name != "target"
+            && name != "venv"
+        {
+            find_aider_histories(&p, depth - 1, out);
+        }
+    }
 }
 
 /// Reads the part of `path` after `offset` (append-only files).
@@ -630,6 +689,7 @@ pong
         let paths = IngestPaths {
             aider_chat: aider.clone(),
             claude_roots: vec![dir.path().join("projects"), dir.path().join("missing")],
+            aider_roots: vec![],
         };
         assert_eq!(ingest(&db, &paths).unwrap(), 6, "5 aider events + 1 claude");
         assert_eq!(ingest(&db, &paths).unwrap(), 0, "nothing new");
@@ -666,6 +726,18 @@ pong
                 std::path::PathBuf::from("/h/.local/share/llm_brain/claude-home/.claude/projects")
             ]
         );
+        assert_eq!(
+            p.aider_roots,
+            vec![std::path::PathBuf::from("/h/Documents/myProjects")]
+        );
+        let env3 = std::collections::HashMap::from([
+            ("HOME".to_string(), "/h".to_string()),
+            ("BRAIN_AIDER_ROOTS".to_string(), "/a:/b".to_string()),
+        ]);
+        assert_eq!(
+            IngestPaths::from_env(&env3, None, None).aider_roots.len(),
+            2
+        );
         let env2 = std::collections::HashMap::from([
             ("HOME".to_string(), "/h".to_string()),
             ("BRAIN_DATA".to_string(), "/d".to_string()),
@@ -675,6 +747,27 @@ pong
         assert_eq!(p2.aider_chat, std::path::PathBuf::from("/a.md"));
         assert_eq!(p2.claude_roots.len(), 3);
         assert_eq!(p2.claude_roots[1], std::path::PathBuf::from("/x"));
+    }
+
+    #[test]
+    fn per_repo_aider_histories_are_discovered_under_the_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("projects/app");
+        std::fs::create_dir_all(repo.join("node_modules/x")).unwrap();
+        std::fs::write(repo.join(".aider.chat.history.md"), CHAT).unwrap();
+        std::fs::write(repo.join("node_modules/x/.aider.chat.history.md"), CHAT).unwrap(); // ignored
+        let db = crate::db::Db::memory().unwrap();
+        let paths = IngestPaths {
+            aider_chat: root.path().join("none.md"),
+            claude_roots: vec![],
+            aider_roots: vec![root.path().join("projects")],
+        };
+        assert_eq!(
+            ingest(&db, &paths).unwrap(),
+            5,
+            "the repo history, not the one under node_modules"
+        );
+        assert_eq!(ingest(&db, &paths).unwrap(), 0);
     }
 
     #[test]

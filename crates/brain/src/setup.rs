@@ -114,6 +114,54 @@ pub fn aider_model_settings(cfg: &Config) -> String {
     out
 }
 
+/// The rules aider loads with `--read` on every session (its CLAUDE.md).
+pub const AIDER_CONVENTIONS: &str = "\
+# Working rules for aider (loaded every session)
+
+- Work in small, complete steps: implement, run the tests, then stop and report.
+- Touch only the files needed for the task; never reformat or reorganize unrelated code.
+- Code, comments and commit messages in English. Conventional commits: `type(scope): summary`.
+- Never commit secrets, `.env` files or credentials. Never edit generated files by hand.
+- Before changing behaviour, read the existing tests for that area; add or update tests with the change.
+- If the request is ambiguous, ask one precise question instead of guessing; otherwise do not ask for confirmation.
+- Prefer editing existing files over creating new ones. No new dependencies without saying why.
+- When a command or test fails, show the relevant lines and fix the cause, not the symptom.
+- At the end of each task, list the files changed and what a reviewer should look at.
+- You have no tools here: reply in plain text and code blocks only; never emit `<tool_call>`, `<function=…>` or JSON tool-call markup. To change a file, describe the edit or show the new content.
+";
+
+/// aider flags that make it behave like a headless-friendly agent: no
+/// confirmations, architect proposals applied, commits on, diffs shown,
+/// history restored per repo, conventions loaded. Shared by the host,
+/// Docker and proxy functions.
+pub fn aider_agent_flags(data: &str) -> String {
+    format!(
+        "--yes-always --auto-accept-architect --auto-commits --show-diffs --restore-chat-history \\\n\
+         --no-suggest-shell-commands --no-check-update --no-show-model-warnings --notifications \\\n\
+         --read {data}/aider-conventions.md"
+    )
+}
+
+/// Shell function that runs aider through the llm_brain proxy: `BRAIN_BASE_URL`
+/// and `BRAIN_DEV_KEY` come from the git-ignored local env file. Chat history
+/// stays per repo (`.aider.chat.history.md`) so `--restore-chat-history`
+/// resumes the right conversation; `brain events ingest` scans the repos.
+pub fn aider_proxy(cfg: &Config) -> Result<String> {
+    let _ = cfg.model_for_tier("fast")?;
+    let data = data_dir();
+    Ok(format!(
+        "# aider through the llm_brain proxy. Paste into ~/.bashrc (after sourcing deploy/server.local.env), run `px-aider` inside a git repo.\n\
+         px-aider() {{\n\
+           OPENAI_API_BASE=\"$BRAIN_BASE_URL/v1\" OPENAI_API_KEY=\"$BRAIN_DEV_KEY\" \\\n\
+           aider --architect --model openai/brain/reasoning --editor-model openai/brain/fast \\\n\
+             --model-metadata-file {data}/aider-model-metadata.json \\\n\
+             --llm-history-file {data}/aider-llm.history \\\n\
+             {flags} \"$@\"\n\
+         }}\n",
+        flags = aider_agent_flags(&data),
+    ))
+}
+
 /// Shell function that runs Claude Code from a Docker image: current repo
 /// mounted, a persistent HOME under `BRAIN_DATA/claude-home` so sessions,
 /// settings and trust survive (and `brain events ingest` reads them), same
@@ -255,6 +303,38 @@ mod tests {
             y1.contains("models: [\"prism-ml/ternary-bonsai-2-27b\"]"),
             "{y1}"
         );
+    }
+
+    #[test]
+    fn aider_proxy_function_is_agent_like() {
+        let out = aider_proxy(&cfg()).unwrap();
+        assert!(out.contains("px-aider() {"));
+        assert!(
+            out.contains(
+                "OPENAI_API_BASE=\"$BRAIN_BASE_URL/v1\" OPENAI_API_KEY=\"$BRAIN_DEV_KEY\""
+            ),
+            "{out}"
+        );
+        assert!(
+            out.contains("--model openai/brain/reasoning --editor-model openai/brain/fast"),
+            "{out}"
+        );
+        for flag in [
+            "--yes-always",
+            "--auto-accept-architect",
+            "--auto-commits",
+            "--show-diffs",
+            "--restore-chat-history",
+            "--no-suggest-shell-commands",
+            "--read $HOME/.local/share/llm_brain/aider-conventions.md",
+        ] {
+            assert!(out.contains(flag), "missing {flag}: {out}");
+        }
+        assert!(
+            !out.contains("--chat-history-file"),
+            "history stays per repo for restore"
+        );
+        assert!(AIDER_CONVENTIONS.contains("Conventional commits"));
     }
 
     #[test]

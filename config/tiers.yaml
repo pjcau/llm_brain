@@ -10,12 +10,14 @@ tiers:
     context: 1048576
     input_usd_per_m: 0.04
     output_usd_per_m: 0.08
+    max_output_tokens: 16384     # policy cap; the provider's own max comes from the OpenRouter catalog
   reasoning:
     model: prism-ml/ternary-bonsai-2-27b
     fallback: deepseek/deepseek-v4-pro
     context: 262144
     input_usd_per_m: 0.075
     output_usd_per_m: 0.5
+    max_output_tokens: 32768
   premium:
     model: null
     fallback: null
