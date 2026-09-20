@@ -465,17 +465,51 @@ async fn main() -> Result<()> {
             refresh,
             days,
         } => {
+            let facts = std::sync::Arc::new(std::sync::Mutex::new(dashboard::Facts::default()));
             let state = dashboard::AppState {
                 cfg: std::sync::Arc::new(cfg.clone()),
                 db_path: db_path.clone(),
                 days,
+                facts: facts.clone(),
             };
             // refresh loop: snapshot (if keys) + ingest (if logs), errors logged, never fatal
             let (cfg_bg, env_bg, client_bg, db_bg) =
                 (cfg.clone(), env.clone(), client.clone(), db_path.clone());
+            let (facts_bg, base_bg) = (facts.clone(), cli.openrouter_base.clone());
+            let http_bg = reqwest::Client::new();
             tokio::spawn(async move {
                 let paths = events::IngestPaths::from_env(&env_bg, None, None);
                 loop {
+                    // catalog facts for the board: Claude reference prices and catalog age
+                    match catalog::Catalog::fetch(&http_bg, &base_bg).await {
+                        Ok(cat) => {
+                            let claude_ref = [
+                                "anthropic/claude-sonnet-4.6",
+                                "anthropic/claude-sonnet-4.5",
+                                "anthropic/claude-sonnet-4",
+                            ]
+                            .iter()
+                            .find_map(|id| {
+                                cat.get(id).map(|m| {
+                                    (id.to_string(), m.prompt_usd_per_m, m.completion_usd_per_m)
+                                })
+                            })
+                            .or_else(|| {
+                                cat.models
+                                    .values()
+                                    .filter(|m| m.id.starts_with("anthropic/claude-sonnet"))
+                                    .map(|m| {
+                                        (m.id.clone(), m.prompt_usd_per_m, m.completion_usd_per_m)
+                                    })
+                                    .next()
+                            });
+                            let mut f = facts_bg.lock().unwrap();
+                            f.claude_ref = claude_ref;
+                            f.catalog_fetched_at = Some(chrono::Utc::now().to_rfc3339());
+                            f.catalog_models = cat.models.len();
+                        }
+                        Err(e) => eprintln!("refresh: catalog failed: {e:#}"),
+                    }
                     // network first (no db borrow across awaits), then a short sync write
                     let fetched = usage::fetch(&cfg_bg, &env_bg, &client_bg).await;
                     match db::Db::open(&db_bg) {

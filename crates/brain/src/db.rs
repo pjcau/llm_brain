@@ -118,6 +118,33 @@ pub struct RecentRow {
     pub degraded: String,
 }
 
+/// Spend of one profile on one UTC day (board chart).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub struct DaySpend {
+    pub day: String,
+    pub profile: String,
+    pub cost_usd: f64,
+    pub requests: i64,
+    pub errors: i64,
+    pub refused: i64,
+}
+
+/// Per-model quality figures over a window (board table).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub struct ModelStat {
+    pub model: String,
+    pub requests: i64,
+    pub errors: i64,
+    /// status 200 with at most one output token: the model answered nothing.
+    pub empty_replies: i64,
+    pub input_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: f64,
+    pub avg_latency_ms: Option<f64>,
+    pub max_latency_ms: Option<i64>,
+}
+
 /// Aggregated proxied traffic for the board.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 pub struct DailyRequests {
@@ -560,6 +587,70 @@ impl Db {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Spend per UTC day × profile over the last `days` (oldest first).
+    pub fn daily_spend(&self, days: u32) -> Result<Vec<DaySpend>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT substr(ts, 1, 10) AS day, profile, SUM(cost_usd), COUNT(*),
+                    SUM(status >= 400 AND status != 429), SUM(status = 429)
+             FROM requests WHERE ts >= date('now', ?1) GROUP BY day, profile ORDER BY day, profile",
+        )?;
+        let rows = stmt.query_map(params![format!("-{days} days")], |r| {
+            Ok(DaySpend {
+                day: r.get(0)?,
+                profile: r.get(1)?,
+                cost_usd: r.get(2)?,
+                requests: r.get(3)?,
+                errors: r.get(4)?,
+                refused: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Per-model figures over the last `days`, forwarded requests only (refusals have no model).
+    pub fn model_stats(&self, days: u32) -> Result<Vec<ModelStat>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT model, COUNT(*), SUM(status >= 400), SUM(status = 200 AND output_tokens <= 1),
+                    SUM(input_tokens + cache_write_tokens), SUM(cache_read_tokens), SUM(output_tokens),
+                    SUM(cost_usd), AVG(latency_ms), MAX(latency_ms)
+             FROM requests WHERE ts >= date('now', ?1) AND model != '' GROUP BY model ORDER BY SUM(cost_usd) DESC",
+        )?;
+        let rows = stmt.query_map(params![format!("-{days} days")], |r| {
+            Ok(ModelStat {
+                model: r.get(0)?,
+                requests: r.get(1)?,
+                errors: r.get(2)?,
+                empty_replies: r.get(3)?,
+                input_tokens: r.get(4)?,
+                cache_read_tokens: r.get(5)?,
+                output_tokens: r.get(6)?,
+                cost_usd: r.get(7)?,
+                avg_latency_ms: r.get(8)?,
+                max_latency_ms: r.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// (input+cache_write, cache_read, output) tokens and cost since `since`, all profiles.
+    pub fn totals_since(&self, since: DateTime<Utc>) -> Result<(i64, i64, i64, f64)> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(SUM(input_tokens + cache_write_tokens),0), COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cost_usd),0)
+             FROM requests WHERE ts >= ?1",
+            params![since.to_rfc3339()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?)
+    }
+
+    /// Authentication failures in the last `minutes`.
+    pub fn auth_failures_since_minutes(&self, minutes: u32) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM auth_audit WHERE outcome != 'revoked' AND ts >= datetime('now', ?1)",
+            params![format!("-{minutes} minutes")],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Sessions (profile × user) active in the last `days`, most recent first.
     pub fn sessions(&self, days: u32, limit: u32) -> Result<Vec<SessionRow>> {
         let mut stmt = self.conn.prepare(
@@ -908,9 +999,30 @@ mod tests {
         assert!((d.spent_usd - 0.77).abs() < 1e-9);
         db.insert_audit("1.2.3.4", "brain_x_…", "unknown").unwrap();
         assert_eq!(db.recent_audit(5).unwrap()[0].outcome, "unknown");
+        let spend = db.daily_spend(1).unwrap();
+        assert!(
+            spend
+                .iter()
+                .any(|s| s.profile == "dev" && (s.cost_usd - 0.77).abs() < 1e-9),
+            "{spend:?}"
+        );
+        let mut empty = row("dev", 0.0);
+        empty.output_tokens = 0;
+        empty.model = "m-empty".into();
+        db.insert_request(&empty).unwrap();
+        let ms = db.model_stats(1).unwrap();
+        let me = ms.iter().find(|m| m.model == "m-empty").unwrap();
+        assert_eq!((me.requests, me.empty_replies), (1, 1));
+        let m = ms.iter().find(|m| m.model == "m").unwrap();
+        assert_eq!(m.empty_replies, 0);
+        let (inp, cr, out, cost) = db
+            .totals_since(Utc::now() - chrono::Duration::hours(1))
+            .unwrap();
+        assert!(inp > 0 && cr == 0 && out > 0 && cost > 0.8);
+        assert_eq!(db.auth_failures_since_minutes(10).unwrap(), 1);
         let recent = db.recent_requests(3).unwrap();
         assert_eq!(recent.len(), 3);
-        assert_eq!(recent[0].user, "cc:abc", "newest first");
+        assert_eq!(recent[0].model, "m-empty", "newest first");
     }
 
     #[test]
