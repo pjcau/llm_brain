@@ -66,6 +66,22 @@ Rate limits: 60 req/min per key, 10 req/min per (key, end user); 20 auth
 failures in 10 minutes block the IP for the window. Ring 1 (the
 OpenRouter key's own daily limit) still holds if all of this fails.
 
+## Agents compared through the proxy (2026-09-20, task `ago-0001`, model deepseek-v4-pro via `brain/agent`)
+
+| Tool | Result | Time | Turns / tool calls | Cost (proxy) |
+|------|--------|------|--------------------|--------------|
+| Claude Code (`px-claude`) | **PASS** | 120 s | 14 turns | ~0.03 $ |
+| OpenCode (`brain bench --tool opencode`) | **PASS** | 41 s | 3 tool calls (grep, read, edit) | ~0.005 $ |
+| OpenCode on `fast` (deepseek-v4-flash, direct) | PASS | 58 s | 10 tool calls | 0.001 $ |
+| aider, architect bonsai + editor deepseek-v4-flash (direct) | PASS | 74 s | — (no tools) | < 0.001 $ |
+
+Before the system-turn fix, Claude Code on non-Claude models failed this
+task with an empty reply; through the proxy it now completes it. OpenCode
+is the open-source agent that matches Claude Code's autonomy at a fraction
+of the tokens (its system prompt is far smaller). Both are usable through
+the proxy today; `brain bench run --via-proxy <url>` runs the suite the way
+the clients actually use it (client key of the `benchmark` profile).
+
 ## Known gaps
 
 - No `fallbacks` on the Anthropic dialect yet (OpenRouter uses a different

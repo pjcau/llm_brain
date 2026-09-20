@@ -337,7 +337,7 @@ and by the container test in CI.
 | `brain models` — tier models with context, provider max output, effective cap, prices from the OpenRouter catalog | network |
 | `brain events ingest [--aider-chat FILE] [--claude-projects DIR]` | the tools' logs |
 | `brain events report [--days 7]` | — |
-| `brain bench run --tool aider\|claude [--tier fast\|reasoning] [--docker IMAGE] [--only id]` — `--tier reasoning` runs aider in architect mode with the fast tier as editor; the settings file is passed if present | `OPENROUTER_KEY_BENCHMARK` |
+| `brain bench run --tool aider\|claude\|opencode [--tier fast\|reasoning\|agent] [--docker IMAGE] [--via-proxy URL] [--only id]` — `--tier reasoning` runs aider in architect mode with the fast tier as editor; the settings file is passed if present | `OPENROUTER_KEY_BENCHMARK` |
 | `brain serve [--bind 127.0.0.1:8080] [--refresh 600] [--days 7]` — proxy (`/v1/*`, key auth) + board | `OPENROUTER_KEY_*` (upstream) |
 | `brain bench report [--run ID]` | — |
 
