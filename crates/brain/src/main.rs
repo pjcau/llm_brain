@@ -148,6 +148,9 @@ enum BenchCmd {
         /// Run the tool inside this Docker image (e.g. llm-brain-aider-test:latest)
         #[arg(long)]
         docker: Option<String>,
+        /// Where each task's tool output is saved
+        #[arg(long, default_value = "bench/.runs")]
+        logs: PathBuf,
     },
     /// Rows of a run (or all runs)
     Report {
@@ -290,7 +293,13 @@ async fn main() -> Result<()> {
                     for path in sessions {
                         let key = path.to_string_lossy().to_string();
                         let (offset, _) = db.ingest_state(&key)?;
-                        let (text, new_offset) = events::read_from(&path, offset)?;
+                        let (text, new_offset) = match events::read_from(&path, offset) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                eprintln!("skipping {}: {e:#}", path.display());
+                                continue;
+                            }
+                        };
                         if new_offset == offset {
                             continue;
                         }
@@ -316,6 +325,7 @@ async fn main() -> Result<()> {
                     only,
                     profile,
                     docker,
+                    logs,
                 } => {
                     let p = cfg.profile(&profile)?;
                     let key = env
@@ -346,6 +356,7 @@ async fn main() -> Result<()> {
                         cost_probe: Some(client.clone()),
                         program_override: None,
                         docker_image: docker,
+                        log_dir: logs,
                     };
                     eprintln!(
                         "run {run_id}: {} task(s), {} on {}",

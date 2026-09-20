@@ -26,6 +26,8 @@ pub struct RunOptions {
     pub program_override: Option<Vec<String>>,
     /// Run the tool inside this Docker image instead of on the host.
     pub docker_image: Option<String>,
+    /// Where the tool's stdout/stderr of every task are saved (`<log_dir>/<run_id>/<task>.{out,err}`).
+    pub log_dir: PathBuf,
 }
 
 #[derive(Debug)]
@@ -114,11 +116,15 @@ async fn run_task(opts: &RunOptions, task: &Task) -> Result<Outcome> {
         let cache = std::fs::canonicalize(&opts.cache_dir)?;
         inv = dockerize(&inv, image, work.path(), &cache, &host_uid_gid());
     }
+    let log_base = opts.log_dir.join(&opts.run_id);
+    std::fs::create_dir_all(&log_base)?;
+    let log_prefix = log_base.join(&task.id);
     let (exit_code, mut notes) = run_tool(
         &inv,
         opts.program_override.as_deref(),
         work.path(),
         task.timeout_s,
+        &log_prefix,
     )
     .await;
     let passed = match exit_code {
@@ -170,12 +176,14 @@ async fn probe(opts: &RunOptions) -> Option<f64> {
         .map(|k| k.usage)
 }
 
-/// Returns (exit code or None on timeout, notes).
+/// Returns (exit code or None on timeout, notes). Saves stdout/stderr next
+/// to `log_prefix` (`.out` / `.err`) so a failed run can be read afterwards.
 async fn run_tool(
     inv: &ToolInvocation,
     override_cmd: Option<&[String]>,
     cwd: &Path,
     timeout_s: u64,
+    log_prefix: &Path,
 ) -> (Option<i32>, String) {
     let (program, args): (String, Vec<String>) = match override_cmd {
         Some(cmd) if !cmd.is_empty() => (cmd[0].clone(), cmd[1..].to_vec()),
@@ -186,7 +194,7 @@ async fn run_tool(
         .current_dir(cwd)
         .envs(&inv.env)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let child = match cmd.spawn() {
@@ -195,6 +203,8 @@ async fn run_tool(
     };
     match tokio::time::timeout(Duration::from_secs(timeout_s), child.wait_with_output()).await {
         Ok(Ok(out)) => {
+            let _ = std::fs::write(log_prefix.with_extension("out"), &out.stdout);
+            let _ = std::fs::write(log_prefix.with_extension("err"), &out.stderr);
             let stderr = String::from_utf8_lossy(&out.stderr);
             let tail: String = stderr
                 .lines()
@@ -206,9 +216,12 @@ async fn run_tool(
                 .collect::<Vec<_>>()
                 .join(" | ");
             let notes = if out.status.success() {
-                String::new()
+                format!("log {};", log_prefix.with_extension("out").display())
             } else {
-                format!("tool stderr: {tail};")
+                format!(
+                    "tool stderr: {tail}; log {};",
+                    log_prefix.with_extension("err").display()
+                )
             };
             (out.status.code(), notes)
         }
@@ -404,6 +417,7 @@ mod tests {
             cost_probe: None,
             program_override: Some(program.into_iter().map(String::from).collect()),
             docker_image: None,
+            log_dir: cache.join("runs"),
         }
     }
 
@@ -430,8 +444,10 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(rows[0].passed);
         assert_eq!(rows[0].tool, "aider");
-        // worktree was removed, cache repo remains
-        assert!(cache.path().read_dir().unwrap().count() == 1);
+        // the tool's stdout was saved under <log_dir>/<run_id>/<task>.out
+        let log = cache.path().join("runs/run-1/t1.out");
+        assert!(log.is_file(), "{}", log.display());
+        assert!(out[0].notes.contains("t1.out"), "{}", out[0].notes);
     }
 
     #[tokio::test]

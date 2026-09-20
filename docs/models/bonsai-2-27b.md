@@ -28,6 +28,21 @@ doesn't change the model, only `provider` in the tier. Natural candidate
 for `fast`; with a high `reasoning_effort`, potentially also a cheap
 `reasoning` — two tiers, one model.
 
+## Measured on 2026-09-20
+
+| Check | Result |
+|-------|--------|
+| Anthropic-format requests (system array, `cache_control`, 25 tools, 60 KB) | accepted |
+| Latency, trivial reply at ~15k input tokens | **33 s** (deepseek-v4-flash: 5.5 s) |
+| Prompt cache | `cache_read_input_tokens: 0` on every call: **no L1 cache** on this provider |
+| Under Claude Code's parallel requests | `429 Provider returned error`, 12 minutes of retries, task failed |
+| aider, `ago-0001` | failed after 831 s |
+| Default output | starts with a `thinking` block: budget `max_tokens` accordingly |
+
+Verdict so far: fine as a chat model, a poor fit as the `fast` tier for
+agentic tools — single slow provider, no cache. Comparison run against
+`deepseek/deepseek-v4-flash` in progress; see the [changelog](../changelog.md).
+
 ## To verify in Phase 0, in order
 
 1. **Tool-call quality** behind Claude Code and aider: how many malformed

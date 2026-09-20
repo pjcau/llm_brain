@@ -29,3 +29,4 @@ yarn-error.log*
 # bench
 /bench/.cache
 /brain.db*
+/bench/.runs
