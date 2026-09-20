@@ -29,6 +29,8 @@ title: Decisions
 | 2026-09-19 | **All code in Rust** (axum + tokio + reqwest + rusqlite + clap), including helpers: one static binary on the VPS. agent-orchestrator's modules are ported, not copied. | [Stack](./analysis/stack.md) |
 | 2026-09-19 | [claude-kit](https://github.com/pjcau/claude-kit) added as a git submodule (`.claude-kit/`) for the skills, agents and hooks used in the dev workflow. | [Stack](./analysis/stack.md) |
 
+| 2026-09-20 | **Daily agent = Claude Code through the proxy (`px-claude`)** on the `agent` tier (deepseek-v4-pro); **aider = cheap editor** for targeted changes, not a Claude Code replacement (no tools, synchronous chat). OpenCode to be benchmarked as the open-source agent alternative. | [Phase 1](./phase-1.md) |
+
 ## Open
 
 1. **Name and stack of assistant and find-a-car** (non-public repos):
