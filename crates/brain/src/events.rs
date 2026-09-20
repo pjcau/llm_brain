@@ -24,6 +24,8 @@ pub struct Event {
     pub cache_write_tokens: i64,
     pub output_tokens: i64,
     pub detail: String,
+    /// Claude Code only: assistant timestamp minus the previous entry's (request → response).
+    pub latency_ms: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -85,6 +87,7 @@ pub fn parse_aider_chat(text: &str, model_hint: &str) -> (Vec<Event>, String) {
                 cache_write_tokens: 0,
                 output_tokens: received,
                 detail: String::new(),
+                latency_ms: None,
             });
             continue;
         }
@@ -113,6 +116,7 @@ pub fn parse_aider_chat(text: &str, model_hint: &str) -> (Vec<Event>, String) {
                 cache_write_tokens: 0,
                 output_tokens: 0,
                 detail: note.chars().take(200).collect(),
+                latency_ms: None,
             });
         }
     }
@@ -167,11 +171,20 @@ struct ClaudeUsage {
 /// (`isApiErrorMessage`). Unparseable lines are skipped.
 pub fn parse_claude_session(text: &str) -> Vec<Event> {
     let mut events = Vec::new();
+    let mut prev_ts: Option<DateTime<Utc>> = None;
     for line in text.lines() {
         let Ok(l) = serde_json::from_str::<ClaudeLine>(line) else {
             continue;
         };
+        let line_ts = l
+            .timestamp
+            .as_deref()
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.with_timezone(&Utc));
         if l.kind.as_deref() != Some("assistant") {
+            if line_ts.is_some() {
+                prev_ts = line_ts;
+            }
             continue;
         }
         let Some(msg) = l.message else { continue };
@@ -204,9 +217,15 @@ pub fn parse_claude_session(text: &str) -> Vec<Event> {
                     .chars()
                     .take(200)
                     .collect(),
+                latency_ms: None,
             });
             continue;
         }
+        let latency_ms = match (prev_ts, line_ts) {
+            (Some(p), Some(t)) => Some((t - p).num_milliseconds().max(0)),
+            _ => None,
+        };
+        prev_ts = line_ts;
         let u = msg.usage.unwrap_or_default();
         events.push(Event {
             ts,
@@ -219,6 +238,7 @@ pub fn parse_claude_session(text: &str) -> Vec<Event> {
             cache_write_tokens: u.cache_creation_input_tokens,
             output_tokens: u.output_tokens,
             detail: String::new(),
+            latency_ms,
         });
     }
     events
@@ -241,6 +261,8 @@ pub struct DailyStat {
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
     pub output_tokens: i64,
+    /// Mean request → response latency where known (Claude Code).
+    pub avg_latency_ms: Option<f64>,
 }
 
 impl DailyStat {
@@ -314,12 +336,23 @@ pub fn anomalies(stats: &[DailyStat]) -> Vec<String> {
 
 pub fn render_report(cfg: &Config, stats: &[DailyStat]) -> String {
     let mut out = format!(
-        "{:<10} {:<7} {:<34} {:>5} {:>4} {:>4} {:>4} {:>8} {:>8} {:>6} {:>7}\n",
-        "day", "tool", "model", "req", "err", "bad", "rtry", "in_tok", "out_tok", "cache", "est$"
+        "{:<10} {:<7} {:<34} {:>5} {:>4} {:>4} {:>4} {:>8} {:>8} {:>6} {:>7} {:>7}\n",
+        "day",
+        "tool",
+        "model",
+        "req",
+        "err",
+        "bad",
+        "rtry",
+        "in_tok",
+        "out_tok",
+        "cache",
+        "est$",
+        "lat_s"
     );
     for s in stats {
         out.push_str(&format!(
-            "{:<10} {:<7} {:<34} {:>5} {:>4} {:>4} {:>4} {:>8} {:>8} {:>6} {:>7}\n",
+            "{:<10} {:<7} {:<34} {:>5} {:>4} {:>4} {:>4} {:>8} {:>8} {:>6} {:>7} {:>7}\n",
             s.day,
             s.source,
             s.model.chars().take(34).collect::<String>(),
@@ -334,6 +367,9 @@ pub fn render_report(cfg: &Config, stats: &[DailyStat]) -> String {
                 .unwrap_or_else(|| "-".into()),
             s.est_cost(cfg)
                 .map(|c| format!("{c:.3}"))
+                .unwrap_or_else(|| "-".into()),
+            s.avg_latency_ms
+                .map(|l| format!("{:.1}", l / 1000.0))
                 .unwrap_or_else(|| "-".into()),
         ));
     }
@@ -409,12 +445,14 @@ pong
 
     #[test]
     fn claude_session_yields_usage_and_api_errors() {
+        let user = r#"{"type":"user","timestamp":"2026-09-19T09:13:30.000Z","sessionId":"s1","message":{"role":"user","content":"hi"}}"#;
         let ok = r#"{"type":"assistant","timestamp":"2026-09-19T09:13:34.802Z","sessionId":"s1","message":{"model":"prism-ml/ternary-bonsai-2-27b","usage":{"input_tokens":2,"cache_creation_input_tokens":14259,"cache_read_input_tokens":24641,"output_tokens":526}}}"#;
         let err = r#"{"type":"assistant","timestamp":"2026-09-19T09:20:00.000Z","sessionId":"s1","error":"authentication_failed","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"Login expired"}]}}"#;
         let junk = "not json\n{\"type\":\"user\"}\n";
-        let ev = parse_claude_session(&format!("{ok}\n{err}\n{junk}"));
+        let ev = parse_claude_session(&format!("{user}\n{ok}\n{err}\n{junk}"));
         assert_eq!(ev.len(), 2);
         assert_eq!(ev[0].kind, "request");
+        assert_eq!(ev[0].latency_ms, Some(4802));
         assert_eq!(ev[0].cache_read_tokens, 24641);
         assert_eq!(ev[0].cache_write_tokens, 14259);
         assert_eq!(ev[0].output_tokens, 526);

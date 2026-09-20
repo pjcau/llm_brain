@@ -88,7 +88,8 @@ CREATE TABLE IF NOT EXISTS events (
   cache_read_tokens INTEGER NOT NULL,
   cache_write_tokens INTEGER NOT NULL,
   output_tokens INTEGER NOT NULL,
-  detail TEXT NOT NULL DEFAULT ''
+  detail TEXT NOT NULL DEFAULT '',
+  latency_ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
 
@@ -115,6 +116,13 @@ impl Db {
 
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA).context("applying schema")?;
+        // migration for databases created before latency_ms existed
+        let has_latency: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('events') WHERE name = 'latency_ms'")?
+            .exists([])?;
+        if !has_latency {
+            conn.execute_batch("ALTER TABLE events ADD COLUMN latency_ms INTEGER")?;
+        }
         Ok(Self { conn })
     }
 
@@ -159,8 +167,8 @@ impl Db {
 
     pub fn insert_events(&self, events: &[Event]) -> Result<usize> {
         let mut stmt = self.conn.prepare_cached(
-            "INSERT INTO events (ts, source, session, model, kind, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, detail)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO events (ts, source, session, model, kind, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, detail, latency_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )?;
         for e in events {
             stmt.execute(params![
@@ -173,7 +181,8 @@ impl Db {
                 e.cache_read_tokens,
                 e.cache_write_tokens,
                 e.output_tokens,
-                e.detail
+                e.detail,
+                e.latency_ms
             ])?;
         }
         Ok(events.len())
@@ -184,7 +193,8 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT substr(ts, 1, 10) AS day, source, model,
                     SUM(kind = 'request'), SUM(kind = 'error'), SUM(kind = 'edit_failed'), SUM(kind = 'retry'),
-                    SUM(input_tokens), SUM(cache_read_tokens), SUM(cache_write_tokens), SUM(output_tokens)
+                    SUM(input_tokens), SUM(cache_read_tokens), SUM(cache_write_tokens), SUM(output_tokens),
+                    AVG(CASE WHEN kind = 'request' THEN latency_ms END)
              FROM events WHERE ts >= datetime('now', ?1)
              GROUP BY day, source, model ORDER BY day DESC, source, model",
         )?;
@@ -201,6 +211,7 @@ impl Db {
                 cache_read_tokens: r.get(8)?,
                 cache_write_tokens: r.get(9)?,
                 output_tokens: r.get(10)?,
+                avg_latency_ms: r.get(11)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -325,6 +336,7 @@ mod tests {
             cache_write_tokens: 0,
             output_tokens: out,
             detail: String::new(),
+            latency_ms: Some(1500),
         };
         db.insert_events(&[
             mk("request", 100, 10),
@@ -345,6 +357,7 @@ mod tests {
             ),
             (2, 1, 1, 300, 30)
         );
+        assert_eq!(s[0].avg_latency_ms, Some(1500.0));
         assert_eq!(db.ingest_state("/x").unwrap(), (0, String::new()));
         db.set_ingest_state("/x", 42, "m").unwrap();
         db.set_ingest_state("/x", 84, "m2").unwrap();

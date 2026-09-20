@@ -262,7 +262,10 @@ async fn main() -> Result<()> {
                 docker: None,
             } => {
                 let (env_block, meta) = setup::aider(&cfg, &profile)?;
-                print!("{env_block}\n# .aider.model.metadata.json\n{meta}\n");
+                print!(
+                    "{env_block}\n# .aider.model.metadata.json\n{meta}\n\n# .aider.model.settings.yml\n{}",
+                    setup::aider_model_settings(&cfg)
+                );
             }
         },
         Cmd::Events { cmd } => {

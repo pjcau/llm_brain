@@ -39,6 +39,12 @@ for `fast`; with a high `reasoning_effort`, potentially also a cheap
 | aider, `ago-0001` | failed after 831 s |
 | Default output | starts with a `thinking` block: budget `max_tokens` accordingly |
 
+Second finding (2026-09-20, real aider session): `Provider returned error`
+with 4 retries on a large architect request, while six small probes passed
+in 1.4 s each — the single provider degrades under size/load. Mitigation
+in place: OpenRouter `models[]` fallback to deepseek-v4-pro
+([configuration](../configuration.md#aider-model-fallbacks-openrouter-models)).
+
 Verdict (decided 2026-09-20): **bonsai is the `reasoning` tier**, not the
 `fast` one. Its strengths (reasoning, 262K context, open weights) fit the
 architect role; its weaknesses (one slow provider, no prompt cache) are

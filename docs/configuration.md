@@ -145,6 +145,7 @@ or-aider() {
       --model openai/prism-ml/ternary-bonsai-2-27b --editor-model openai/deepseek/deepseek-v4-flash \
       --no-check-update --no-analytics \
       --model-metadata-file "$HOME/.local/share/llm_brain/aider-model-metadata.json" \
+      --model-settings-file "$HOME/.local/share/llm_brain/aider-model-settings.yml" \
       --chat-history-file "$HOME/.local/share/llm_brain/aider-chat.md" \
       --llm-history-file "$HOME/.local/share/llm_brain/aider-llm.history" "$@"
 }
@@ -154,6 +155,7 @@ or-aider-host() {
   OPENAI_API_BASE=https://openrouter.ai/api/v1 OPENAI_API_KEY="$OPENROUTER_KEY_DEV" \
   aider --architect --model openai/prism-ml/ternary-bonsai-2-27b --editor-model openai/deepseek/deepseek-v4-flash \
     --model-metadata-file "$HOME/.local/share/llm_brain/aider-model-metadata.json" \
+    --model-settings-file "$HOME/.local/share/llm_brain/aider-model-settings.yml" \
     --chat-history-file "$HOME/.local/share/llm_brain/aider-chat.md" \
     --llm-history-file "$HOME/.local/share/llm_brain/aider-llm.history" "$@"
 }
@@ -179,6 +181,30 @@ If aider is installed on the host instead of Docker, the equivalent is
 *every* Claude Code session go through OpenRouter (and stop using the
 subscription). Use the function while measuring, the settings file when
 you switch for good.
+
+## aider model fallbacks (OpenRouter `models[]`)
+
+bonsai has a single provider; when it returns an error, aider would only
+retry. `brain setup aider` also prints `.aider.model.settings.yml`, saved
+at `~/.local/share/llm_brain/aider-model-settings.yml` and passed with
+`--model-settings-file`: per model, `extra_params.extra_body.models` lists
+the tier's primary and fallback, and OpenRouter switches on provider
+errors, rate limits or downtime, billing the model actually used (verified
+on the wire on 2026-09-20).
+
+```yaml
+- name: openai/prism-ml/ternary-bonsai-2-27b
+  extra_params:
+    extra_body:
+      models: ["prism-ml/ternary-bonsai-2-27b", "deepseek/deepseek-v4-pro"]
+- name: openai/deepseek/deepseek-v4-flash
+  extra_params:
+    extra_body:
+      models: ["deepseek/deepseek-v4-flash", "qwen/qwen3.7-flash"]
+```
+
+Claude Code cannot get the equivalent (`fallbacks` on the Anthropic
+endpoint) from environment variables: that is a Phase 1 proxy feature.
 
 ## aider model metadata
 
