@@ -175,6 +175,32 @@ or-claude() {
 If aider is installed on the host instead of Docker, the equivalent is
 `brain setup aider` (env block + `.aider.model.metadata.json`).
 
+### Through the proxy (Phase 1)
+
+Same tools, base URL = the VPS, key = a client key issued on the server.
+`BRAIN_BASE_URL` and `BRAIN_DEV_KEY` live in the git-ignored
+`deploy/server.local.env`, sourced by `~/.bashrc`:
+
+```bash
+px-aider() {
+  OPENAI_API_BASE="$BRAIN_BASE_URL/v1" OPENAI_API_KEY="$BRAIN_DEV_KEY" \
+  aider --architect --model openai/brain/reasoning --editor-model openai/brain/fast \
+    --model-metadata-file "$HOME/.local/share/llm_brain/aider-model-metadata.json" \
+    --chat-history-file "$HOME/.local/share/llm_brain/aider-chat.md" \
+    --llm-history-file "$HOME/.local/share/llm_brain/aider-llm.history" "$@"
+}
+px-claude() {
+  ANTHROPIC_BASE_URL="$BRAIN_BASE_URL" ANTHROPIC_AUTH_TOKEN="$BRAIN_DEV_KEY" \
+  ANTHROPIC_MODEL=brain/fast ANTHROPIC_DEFAULT_HAIKU_MODEL=brain/fast \
+  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 claude "$@"
+}
+```
+
+`brain/fast` and `brain/reasoning` are aliases resolved on the server; the
+proxy adds the `models[]` fallback itself, so no settings file is needed
+for that (the aider metadata file has entries for the aliases so costs
+display).
+
 ### Claude Code via `settings.json` instead of a function
 
 `~/.claude/settings.json` → `"env": { … }` with the same six variables makes

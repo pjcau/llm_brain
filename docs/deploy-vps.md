@@ -82,6 +82,15 @@ Backups (optional now, required for the proxy): `/etc/litestream.yml` from
 systemctl stop brain && curl -fsSLo /opt/llm_brain/brain https://github.com/pjcau/llm_brain/releases/latest/download/brain-aarch64-unknown-linux-gnu && chmod 0755 /opt/llm_brain/brain && systemctl start brain
 ```
 
+## Phase 1 on the VPS (2026-09-20)
+
+v0.2.0 deployed: `brain serve` is the proxy + board. Caddy sends `/v1/*`,
+`/api/hello` and `/health` straight to brain (the proxy's own key auth
+applies) and keeps basic auth on the board. Verified from outside: `401`
+without a key in both dialects, a real call with a `dev` client key
+succeeds. Keys are issued on the server:
+`sudo -u brain env BRAIN_HOME=/opt/llm_brain BRAIN_DB=/opt/llm_brain/data/brain.db ./brain keys create --profile dev --name laptop`.
+
 ## What is exposed
 
 Caddy on 80/443 with automatic HTTPS, everything else closed by ufw;
