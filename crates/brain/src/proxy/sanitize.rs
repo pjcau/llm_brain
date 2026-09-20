@@ -84,6 +84,46 @@ pub fn sanitize_anthropic(body: &mut Value) -> Vec<&'static str> {
         obj.remove("thinking");
         removed.push("thinking.adaptive");
     }
+    // Claude Code appends `role: "system"` entries mid-conversation (its reminders).
+    // api.anthropic.com accepts them; non-Claude models behind OpenRouter see a
+    // trailing system turn and answer nothing (measured: end_turn, 0 blocks).
+    // Turn them into user turns and merge consecutive user turns so the last
+    // message is always a user one.
+    if let Some(msgs) = obj.get_mut("messages").and_then(Value::as_array_mut) {
+        let mut hit = false;
+        for m in msgs.iter_mut() {
+            if m.get("role").and_then(Value::as_str) == Some("system")
+                && let Some(o) = m.as_object_mut()
+            {
+                let content = Value::Array(blocks(o.get("content")));
+                o.insert("role".into(), json!("user"));
+                o.insert("content".into(), content);
+                hit = true;
+            }
+        }
+        if hit {
+            let mut merged: Vec<Value> = Vec::with_capacity(msgs.len());
+            for m in msgs.drain(..) {
+                let same_role = merged
+                    .last()
+                    .and_then(|p| p.get("role"))
+                    .and_then(Value::as_str)
+                    == m.get("role").and_then(Value::as_str);
+                if same_role && m.get("role").and_then(Value::as_str) == Some("user") {
+                    let prev = merged.last_mut().unwrap();
+                    let mut a = blocks(prev.get("content"));
+                    a.extend(blocks(m.get("content")));
+                    if let Some(po) = prev.as_object_mut() {
+                        po.insert("content".into(), Value::Array(a));
+                    }
+                } else {
+                    merged.push(m);
+                }
+            }
+            *msgs = merged;
+            removed.push("system-turns");
+        }
+    }
     if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
         let mut hit = false;
         for t in tools.iter_mut() {
@@ -97,6 +137,15 @@ pub fn sanitize_anthropic(body: &mut Value) -> Vec<&'static str> {
         }
     }
     removed
+}
+
+/// A message's content as a list of blocks (a bare string becomes one text block).
+fn blocks(content: Option<&Value>) -> Vec<Value> {
+    match content {
+        Some(Value::Array(a)) => a.clone(),
+        Some(Value::String(t)) => vec![json!({"type": "text", "text": t})],
+        _ => Vec::new(),
+    }
 }
 
 /// OpenAI-dialect body: add the fallback chain and ask OpenRouter to report
@@ -242,6 +291,47 @@ mod tests {
         let mut b2 = json!({"thinking": {"type": "enabled", "budget_tokens": 1024}});
         assert!(sanitize_anthropic(&mut b2).is_empty());
         assert!(b2.get("thinking").is_some());
+    }
+
+    #[test]
+    fn mid_conversation_system_turns_become_user_turns_and_merge() {
+        // the measured failing shape: …, assistant tool_use, user tool_result, system reminder (last)
+        let mut body = json!({"messages": [
+            {"role": "user", "content": "run the tests"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "pytest"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "1 passed"}]},
+            {"role": "system", "content": [{"type": "text", "text": "<system-reminder>be brief</system-reminder>", "cache_control": {"type": "ephemeral"}}]}
+        ]});
+        let removed = sanitize_anthropic(&mut body);
+        assert_eq!(removed, vec!["system-turns"]);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(
+            msgs.len(),
+            3,
+            "the system turn merged into the previous user turn"
+        );
+        assert_eq!(msgs[2]["role"], "user");
+        let blocks = msgs[2]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(
+            blocks[1]["text"],
+            "<system-reminder>be brief</system-reminder>"
+        );
+        assert_eq!(
+            blocks[1]["cache_control"]["type"], "ephemeral",
+            "block attributes preserved"
+        );
+        // a system turn right after an assistant turn becomes its own user turn
+        let mut b2 = json!({"messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [{"type": "text", "text": "hello"}]},
+            {"role": "system", "content": "reminder"}
+        ]});
+        sanitize_anthropic(&mut b2);
+        let m = b2["messages"].as_array().unwrap();
+        assert_eq!((m.len(), m[2]["role"].as_str().unwrap()), (3, "user"));
+        assert_eq!(m[2]["content"][0]["text"], "reminder");
     }
 
     #[test]
