@@ -3,7 +3,7 @@
 //! the delta of the benchmark key's `usage` (OpenRouter reports USD), record.
 
 use super::task::Task;
-use super::tool::{Endpoint, Tool, ToolInvocation, invocation};
+use super::tool::{Endpoint, Tool, ToolInvocation, dockerize, invocation};
 use crate::db::{BenchRun, Db};
 use crate::openrouter::Client;
 use anyhow::{Context, Result, bail};
@@ -24,6 +24,8 @@ pub struct RunOptions {
     pub cost_probe: Option<Client>,
     /// Tests only: run this command instead of the tool (same cwd and env).
     pub program_override: Option<Vec<String>>,
+    /// Run the tool inside this Docker image instead of on the host.
+    pub docker_image: Option<String>,
 }
 
 #[derive(Debug)]
@@ -77,7 +79,7 @@ async fn run_task(opts: &RunOptions, task: &Task) -> Result<Outcome> {
     .await?;
 
     if let Some(setup) = task.setup.as_deref()
-        && !shell(setup, work.path(), task.timeout_s).await?
+        && let Some(err) = shell_err(setup, work.path(), task.timeout_s).await?
     {
         let _ = git(
             &repo_dir,
@@ -95,19 +97,23 @@ async fn run_task(opts: &RunOptions, task: &Task) -> Result<Outcome> {
             cost_usd: None,
             seconds: 0.0,
             exit_code: None,
-            notes: "setup failed;".into(),
+            notes: format!("setup failed: {err};"),
         });
     }
 
     let usage_before = probe(opts).await;
     let started = Instant::now();
-    let inv = invocation(
+    let mut inv = invocation(
         opts.tool,
         &opts.endpoint,
         &opts.model,
         &task.prompt,
         &opts.run_id,
     );
+    if let Some(image) = opts.docker_image.as_deref() {
+        let cache = std::fs::canonicalize(&opts.cache_dir)?;
+        inv = dockerize(&inv, image, work.path(), &cache, &host_uid_gid());
+    }
     let (exit_code, mut notes) = run_tool(
         &inv,
         opts.program_override.as_deref(),
@@ -227,6 +233,44 @@ async fn bring_test_files(work: &Path, task: &Task) -> Result<()> {
         .context("bringing test files from commit_fix")
 }
 
+/// Runs a shell command in `cwd`; `None` on success, otherwise the reason
+/// (last stderr lines, or timeout).
+async fn shell_err(command: &str, cwd: &Path, timeout_s: u64) -> Result<Option<String>> {
+    let fut = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(Duration::from_secs(timeout_s), fut).await {
+        Ok(out) => {
+            let out = out?;
+            if out.status.success() {
+                return Ok(None);
+            }
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let tail = stderr
+                .lines()
+                .rev()
+                .take(3)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join(" | ");
+            Ok(Some(if tail.is_empty() {
+                format!("exit {}", out.status.code().unwrap_or(-1))
+            } else {
+                tail
+            }))
+        }
+        Err(_) => Ok(Some(format!("timeout after {timeout_s}s"))),
+    }
+}
+
 /// Runs a shell command in `cwd`; false on non-zero exit or timeout.
 async fn shell(command: &str, cwd: &Path, timeout_s: u64) -> Result<bool> {
     let fut = Command::new("sh")
@@ -242,6 +286,20 @@ async fn shell(command: &str, cwd: &Path, timeout_s: u64) -> Result<bool> {
         Ok(status) => Ok(status?.success()),
         Err(_) => Ok(false),
     }
+}
+
+/// `uid:gid` of the current user, so files the container writes stay ours.
+fn host_uid_gid() -> String {
+    let id = |flag: &str| {
+        std::process::Command::new("id")
+            .arg(flag)
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "1000".into())
+    };
+    format!("{}:{}", id("-u"), id("-g"))
 }
 
 /// Clone once into `cache/<slug>`, fetch afterwards.
@@ -345,6 +403,7 @@ mod tests {
             run_id: "run-1".into(),
             cost_probe: None,
             program_override: Some(program.into_iter().map(String::from).collect()),
+            docker_image: None,
         }
     }
 
@@ -455,9 +514,13 @@ mod tests {
         let out = run_suite(&o, &[t.clone()], &db).await.unwrap();
         assert!(out[0].passed, "{:?}", out[0]);
 
-        t.setup = Some("false".into());
+        t.setup = Some("echo 'no module named venv' >&2; exit 3".into());
         let out = run_suite(&o, &[t], &db).await.unwrap();
         assert!(!out[0].passed);
-        assert!(out[0].notes.contains("setup failed"));
+        assert!(
+            out[0].notes.contains("setup failed: no module named venv"),
+            "{}",
+            out[0].notes
+        );
     }
 }

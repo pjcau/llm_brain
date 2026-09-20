@@ -4,6 +4,7 @@
 
 use clap::ValueEnum;
 use std::collections::BTreeMap;
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Tool {
@@ -108,6 +109,45 @@ pub fn invocation(
     }
 }
 
+/// Wraps an invocation in `docker run` so a tool that is not installed on the
+/// host (aider) runs from an image. The worktree and the repo cache are
+/// mounted at their host paths, so the worktree's `.git` pointer still
+/// resolves; the container runs as the host user so files stay writable.
+pub fn dockerize(
+    inv: &ToolInvocation,
+    image: &str,
+    worktree: &Path,
+    cache: &Path,
+    uid_gid: &str,
+) -> ToolInvocation {
+    let mut args: Vec<String> = vec![
+        "run".into(),
+        "--rm".into(),
+        "--user".into(),
+        uid_gid.into(),
+        "-e".into(),
+        "HOME=/tmp".into(),
+        "-v".into(),
+        format!("{0}:{0}", worktree.display()),
+        "-v".into(),
+        format!("{0}:{0}", cache.display()),
+        "-w".into(),
+        worktree.display().to_string(),
+    ];
+    for (k, v) in &inv.env {
+        args.push("-e".into());
+        args.push(format!("{k}={v}"));
+    }
+    args.push(image.into());
+    args.push(inv.program.clone());
+    args.extend(inv.args.iter().cloned());
+    ToolInvocation {
+        program: "docker".into(),
+        args,
+        env: BTreeMap::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +169,50 @@ mod tests {
         assert!(inv.args.contains(&"--yes-always".to_string()));
         assert!(inv.args.contains(&"--no-auto-commits".to_string()));
         assert!(!inv.env.contains_key("ANTHROPIC_BASE_URL"));
+    }
+
+    #[test]
+    fn dockerize_mounts_paths_passes_env_and_keeps_the_command() {
+        let inv = invocation(
+            Tool::Aider,
+            &Endpoint::openrouter("sk-b"),
+            "m",
+            "fix it",
+            "r1",
+        );
+        let d = dockerize(
+            &inv,
+            "llm-brain-aider-test:latest",
+            Path::new("/tmp/wt-1"),
+            Path::new("/repo/cache"),
+            "1000:1000",
+        );
+        assert_eq!(d.program, "docker");
+        assert!(
+            d.env.is_empty(),
+            "env travels as -e flags, not as process env"
+        );
+        let a = d.args.join(" ");
+        assert!(
+            a.starts_with("run --rm --user 1000:1000 -e HOME=/tmp"),
+            "{a}"
+        );
+        assert!(
+            a.contains("-v /tmp/wt-1:/tmp/wt-1 -v /repo/cache:/repo/cache -w /tmp/wt-1"),
+            "{a}"
+        );
+        assert!(
+            a.contains("-e OPENAI_API_BASE=https://openrouter.ai/api/v1"),
+            "{a}"
+        );
+        assert!(a.contains("-e OPENAI_API_KEY=sk-b"), "{a}");
+        let i = d
+            .args
+            .iter()
+            .position(|x| x == "llm-brain-aider-test:latest")
+            .unwrap();
+        assert_eq!(d.args[i + 1], "aider");
+        assert_eq!(&d.args[i + 2..i + 4], ["--model", "openai/m"]);
     }
 
     #[test]

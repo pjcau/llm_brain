@@ -1,6 +1,7 @@
 //! SQLite persistence for Phase 0: usage snapshots per profile and benchmark
 //! runs. One file, WAL mode; `Db::memory()` for tests.
 
+use crate::events::{DailyStat, Event};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
@@ -75,6 +76,28 @@ CREATE TABLE IF NOT EXISTS bench_runs (
   notes TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS bench_runs_run ON bench_runs(run_id);
+
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY,
+  ts TEXT NOT NULL,
+  source TEXT NOT NULL,
+  session TEXT NOT NULL,
+  model TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  input_tokens INTEGER NOT NULL,
+  cache_read_tokens INTEGER NOT NULL,
+  cache_write_tokens INTEGER NOT NULL,
+  output_tokens INTEGER NOT NULL,
+  detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
+
+-- append-only files already read up to `offset`
+CREATE TABLE IF NOT EXISTS ingest_files (
+  path TEXT PRIMARY KEY,
+  offset INTEGER NOT NULL,
+  model_hint TEXT NOT NULL DEFAULT ''
+);
 "#;
 
 impl Db {
@@ -132,6 +155,76 @@ impl Db {
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn insert_events(&self, events: &[Event]) -> Result<usize> {
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO events (ts, source, session, model, kind, input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, detail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )?;
+        for e in events {
+            stmt.execute(params![
+                e.ts.to_rfc3339(),
+                e.source,
+                e.session,
+                e.model,
+                e.kind,
+                e.input_tokens,
+                e.cache_read_tokens,
+                e.cache_write_tokens,
+                e.output_tokens,
+                e.detail
+            ])?;
+        }
+        Ok(events.len())
+    }
+
+    /// Per UTC day × source × model over the last `days`.
+    pub fn daily_stats(&self, days: u32) -> Result<Vec<DailyStat>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT substr(ts, 1, 10) AS day, source, model,
+                    SUM(kind = 'request'), SUM(kind = 'error'), SUM(kind = 'edit_failed'), SUM(kind = 'retry'),
+                    SUM(input_tokens), SUM(cache_read_tokens), SUM(cache_write_tokens), SUM(output_tokens)
+             FROM events WHERE ts >= datetime('now', ?1)
+             GROUP BY day, source, model ORDER BY day DESC, source, model",
+        )?;
+        let rows = stmt.query_map(params![format!("-{days} days")], |r| {
+            Ok(DailyStat {
+                day: r.get(0)?,
+                source: r.get(1)?,
+                model: r.get(2)?,
+                requests: r.get(3)?,
+                errors: r.get(4)?,
+                edit_failed: r.get(5)?,
+                retries: r.get(6)?,
+                input_tokens: r.get(7)?,
+                cache_read_tokens: r.get(8)?,
+                cache_write_tokens: r.get(9)?,
+                output_tokens: r.get(10)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// (offset, model_hint) of an ingested file; (0, "") if never seen.
+    pub fn ingest_state(&self, path: &str) -> Result<(u64, String)> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT offset, model_hint FROM ingest_files WHERE path = ?1")?;
+        let mut rows = stmt.query(params![path])?;
+        match rows.next()? {
+            Some(r) => Ok((r.get::<_, i64>(0)? as u64, r.get(1)?)),
+            None => Ok((0, String::new())),
+        }
+    }
+
+    pub fn set_ingest_state(&self, path: &str, offset: u64, model_hint: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO ingest_files (path, offset, model_hint) VALUES (?1, ?2, ?3)
+             ON CONFLICT(path) DO UPDATE SET offset = excluded.offset, model_hint = excluded.model_hint",
+            params![path, offset as i64, model_hint],
+        )?;
+        Ok(())
     }
 
     pub fn insert_bench_run(&self, b: &BenchRun) -> Result<()> {
@@ -215,6 +308,47 @@ mod tests {
         let dev = rows.iter().find(|r| r.profile == "dev").unwrap();
         assert_eq!(dev.usage_daily, 1.1);
         assert_eq!(dev.limit, Some(3.0));
+    }
+
+    #[test]
+    fn events_aggregate_per_day_and_ingest_state_round_trips() {
+        let db = Db::memory().unwrap();
+        let now = Utc::now();
+        let mk = |kind: &str, inp: i64, out: i64| Event {
+            ts: now,
+            source: "aider".into(),
+            session: "s".into(),
+            model: "m".into(),
+            kind: kind.into(),
+            input_tokens: inp,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            output_tokens: out,
+            detail: String::new(),
+        };
+        db.insert_events(&[
+            mk("request", 100, 10),
+            mk("request", 200, 20),
+            mk("error", 0, 0),
+            mk("retry", 0, 0),
+        ])
+        .unwrap();
+        let s = db.daily_stats(1).unwrap();
+        assert_eq!(s.len(), 1);
+        assert_eq!(
+            (
+                s[0].requests,
+                s[0].errors,
+                s[0].retries,
+                s[0].input_tokens,
+                s[0].output_tokens
+            ),
+            (2, 1, 1, 300, 30)
+        );
+        assert_eq!(db.ingest_state("/x").unwrap(), (0, String::new()));
+        db.set_ingest_state("/x", 42, "m").unwrap();
+        db.set_ingest_state("/x", 84, "m2").unwrap();
+        assert_eq!(db.ingest_state("/x").unwrap(), (84, "m2".to_string()));
     }
 
     #[test]

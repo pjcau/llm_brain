@@ -9,6 +9,11 @@ use serde_json::json;
 pub const OPENROUTER_ANTHROPIC_BASE: &str = "https://openrouter.ai/api";
 pub const OPENROUTER_OPENAI_BASE: &str = "https://openrouter.ai/api/v1";
 
+/// Where the tools' logs go so `brain events ingest` finds them.
+pub fn data_dir() -> String {
+    std::env::var("BRAIN_DATA").unwrap_or_else(|_| "$HOME/.local/share/llm_brain".into())
+}
+
 /// Env block for Claude Code. See docs/architecture/client-compatibility.md
 /// for why each variable is there.
 pub fn claude_code(cfg: &Config, profile: &str) -> Result<String> {
@@ -40,8 +45,12 @@ pub fn aider(cfg: &Config, profile: &str) -> Result<(String, String)> {
         "# aider → OpenRouter (profile `{profile}`, Phase 0)\n\
          export OPENAI_API_BASE={OPENROUTER_OPENAI_BASE}\n\
          export OPENAI_API_KEY=\"${key_env}\"\n\
+         # logs that `brain events ingest` reads (BRAIN_DATA)\n\
+         mkdir -p {data}\n\
          # 90/10: editor = fast, architect = reasoning\n\
-         aider --architect --model openai/{reasoning} --editor-model openai/{fast} --auto-test\n",
+         aider --architect --model openai/{reasoning} --editor-model openai/{fast} --auto-test \\\n\
+               --chat-history-file {data}/aider-chat.md --llm-history-file {data}/aider-llm.history\n",
+        data = data_dir(),
     );
     let mut meta = serde_json::Map::new();
     for tier in ["fast", "reasoning"] {
@@ -62,6 +71,31 @@ pub fn aider(cfg: &Config, profile: &str) -> Result<(String, String)> {
     Ok((
         env,
         serde_json::to_string_pretty(&serde_json::Value::Object(meta))?,
+    ))
+}
+
+/// Shell function that runs aider from the Docker image with the current
+/// repo mounted, for machines where aider is not installed. Same model
+/// split and log files as [`aider`], so `brain events ingest` sees it.
+pub fn aider_docker(cfg: &Config, profile: &str, image: &str) -> Result<String> {
+    let p = cfg.profile(profile)?;
+    let fast = cfg.model_for_tier("fast")?;
+    let reasoning = cfg.model_for_tier("reasoning").unwrap_or(fast);
+    let key_env = p.key_env();
+    let data = data_dir();
+    Ok(format!(
+        "# aider from Docker → OpenRouter (profile `{profile}`). Paste into ~/.bashrc, then run `or-aider` inside a git repo.\n\
+         # Save the metadata JSON from `brain setup aider` as {data}/aider-model-metadata.json for cost display.\n\
+         or-aider() {{\n\
+           mkdir -p {data}\n\
+           docker run --rm -it --user \"$(id -u):$(id -g)\" -e HOME=/tmp \\\n\
+             -v \"$PWD:$PWD\" -w \"$PWD\" -v \"{data}:{data}\" \\\n\
+             -e OPENAI_API_BASE={OPENROUTER_OPENAI_BASE} -e OPENAI_API_KEY=\"${key_env}\" \\\n\
+             {image} aider --architect --model openai/{reasoning} --editor-model openai/{fast} \\\n\
+               --no-check-update --no-analytics \\\n\
+               --model-metadata-file {data}/aider-model-metadata.json \\\n\
+               --chat-history-file {data}/aider-chat.md --llm-history-file {data}/aider-llm.history \"$@\"\n\
+         }}\n",
     ))
 }
 
@@ -89,10 +123,36 @@ mod tests {
     }
 
     #[test]
+    fn aider_docker_function_mounts_repo_and_logs_with_the_dev_key() {
+        let out = aider_docker(&cfg(), "dev", "llm-brain-aider-test:latest").unwrap();
+        assert!(out.contains("or-aider() {"));
+        assert!(out.contains("-v \"$PWD:$PWD\" -w \"$PWD\""), "{out}");
+        assert!(
+            out.contains("-e OPENAI_API_KEY=\"$OPENROUTER_KEY_DEV\""),
+            "{out}"
+        );
+        assert!(out.contains("llm-brain-aider-test:latest aider --architect --model openai/deepseek/deepseek-v4-pro --editor-model openai/prism-ml/ternary-bonsai-2-27b"), "{out}");
+        assert!(
+            out.contains("--chat-history-file $HOME/.local/share/llm_brain/aider-chat.md"),
+            "{out}"
+        );
+        assert!(
+            out.contains(
+                "--model-metadata-file $HOME/.local/share/llm_brain/aider-model-metadata.json"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn aider_block_uses_architect_editor_split_and_prices_metadata() {
         let (env, meta) = aider(&cfg(), "dev").unwrap();
         assert!(env.contains("OPENAI_API_BASE=https://openrouter.ai/api/v1"));
         assert!(env.contains("--model openai/deepseek/deepseek-v4-pro --editor-model openai/prism-ml/ternary-bonsai-2-27b"));
+        assert!(
+            env.contains("--chat-history-file $HOME/.local/share/llm_brain/aider-chat.md"),
+            "{env}"
+        );
         let v: serde_json::Value = serde_json::from_str(&meta).unwrap();
         let fast = &v["openai/prism-ml/ternary-bonsai-2-27b"];
         assert_eq!(fast["max_input_tokens"], 262144);

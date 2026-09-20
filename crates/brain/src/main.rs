@@ -7,6 +7,7 @@
 mod bench;
 mod config;
 mod db;
+mod events;
 mod keys;
 mod openrouter;
 mod setup;
@@ -49,6 +50,11 @@ enum Cmd {
     Setup {
         #[command(subcommand)]
         cmd: SetupCmd,
+    },
+    /// Errors, tokens and anomalies from the tools' own logs
+    Events {
+        #[command(subcommand)]
+        cmd: EventsCmd,
     },
     /// Benchmark suite
     Bench {
@@ -94,6 +100,27 @@ enum SetupCmd {
     Aider {
         #[arg(long, default_value = "dev")]
         profile: String,
+        /// Print a shell function that runs aider from this Docker image instead
+        #[arg(long, value_name = "IMAGE")]
+        docker: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum EventsCmd {
+    /// Read new lines from aider's chat history and Claude Code's session files
+    Ingest {
+        /// aider chat history (default: $BRAIN_DATA/aider-chat.md)
+        #[arg(long)]
+        aider_chat: Option<PathBuf>,
+        /// Claude Code projects dir (default: ~/.claude/projects)
+        #[arg(long)]
+        claude_projects: Option<PathBuf>,
+    },
+    /// Day × tool × model: requests, errors, tokens, cache hit, anomalies
+    Report {
+        #[arg(long, default_value_t = 7)]
+        days: u32,
     },
 }
 
@@ -118,6 +145,9 @@ enum BenchCmd {
         /// Profile whose key pays (and whose usage delta is the cost)
         #[arg(long, default_value = "benchmark")]
         profile: String,
+        /// Run the tool inside this Docker image (e.g. llm-brain-aider-test:latest)
+        #[arg(long)]
+        docker: Option<String>,
     },
     /// Rows of a run (or all runs)
     Report {
@@ -202,11 +232,78 @@ async fn main() -> Result<()> {
         }
         Cmd::Setup { cmd } => match cmd {
             SetupCmd::ClaudeCode { profile } => print!("{}", setup::claude_code(&cfg, &profile)?),
-            SetupCmd::Aider { profile } => {
+            SetupCmd::Aider {
+                profile,
+                docker: Some(image),
+            } => print!("{}", setup::aider_docker(&cfg, &profile, &image)?),
+            SetupCmd::Aider {
+                profile,
+                docker: None,
+            } => {
                 let (env_block, meta) = setup::aider(&cfg, &profile)?;
                 print!("{env_block}\n# .aider.model.metadata.json\n{meta}\n");
             }
         },
+        Cmd::Events { cmd } => {
+            let db = db::Db::open(&db_path)?;
+            match cmd {
+                EventsCmd::Ingest {
+                    aider_chat,
+                    claude_projects,
+                } => {
+                    let home = env.get("HOME").cloned().unwrap_or_default();
+                    let data = env
+                        .get("BRAIN_DATA")
+                        .cloned()
+                        .unwrap_or_else(|| format!("{home}/.local/share/llm_brain"));
+                    let aider_chat = aider_chat
+                        .unwrap_or_else(|| PathBuf::from(format!("{data}/aider-chat.md")));
+                    let claude_projects = claude_projects
+                        .unwrap_or_else(|| PathBuf::from(format!("{home}/.claude/projects")));
+                    let mut total = 0;
+                    if aider_chat.is_file() {
+                        let key = aider_chat.to_string_lossy().to_string();
+                        let (offset, hint) = db.ingest_state(&key)?;
+                        let (text, new_offset) = events::read_from(&aider_chat, offset)?;
+                        let (ev, model) = events::parse_aider_chat(&text, &hint);
+                        total += db.insert_events(&ev)?;
+                        db.set_ingest_state(&key, new_offset, &model)?;
+                    } else {
+                        eprintln!(
+                            "no aider chat history at {} (use `brain setup aider`)",
+                            aider_chat.display()
+                        );
+                    }
+                    let mut sessions = Vec::new();
+                    if claude_projects.is_dir() {
+                        for project in std::fs::read_dir(&claude_projects)?.flatten() {
+                            if let Ok(files) = std::fs::read_dir(project.path()) {
+                                sessions.extend(
+                                    files
+                                        .flatten()
+                                        .map(|f| f.path())
+                                        .filter(|p| p.extension().is_some_and(|e| e == "jsonl")),
+                                );
+                            }
+                        }
+                    }
+                    for path in sessions {
+                        let key = path.to_string_lossy().to_string();
+                        let (offset, _) = db.ingest_state(&key)?;
+                        let (text, new_offset) = events::read_from(&path, offset)?;
+                        if new_offset == offset {
+                            continue;
+                        }
+                        total += db.insert_events(&events::parse_claude_session(&text))?;
+                        db.set_ingest_state(&key, new_offset, "")?;
+                    }
+                    println!("ingested {total} event(s)");
+                }
+                EventsCmd::Report { days } => {
+                    print!("{}", events::render_report(&cfg, &db.daily_stats(days)?))
+                }
+            }
+        }
         Cmd::Bench { cmd } => {
             let db = db::Db::open(&db_path)?;
             match cmd {
@@ -218,6 +315,7 @@ async fn main() -> Result<()> {
                     cache,
                     only,
                     profile,
+                    docker,
                 } => {
                     let p = cfg.profile(&profile)?;
                     let key = env
@@ -247,6 +345,7 @@ async fn main() -> Result<()> {
                         run_id: run_id.clone(),
                         cost_probe: Some(client.clone()),
                         program_override: None,
+                        docker_image: docker,
                     };
                     eprintln!(
                         "run {run_id}: {} task(s), {} on {}",

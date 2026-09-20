@@ -46,6 +46,73 @@ Tiers as configured (prices from OpenRouter, 2026-09-19):
 7. Run the suite once with each tool: `brain bench run --tool aider` and
    `--tool claude`; compare with `brain bench report`.
 
+## Test it yourself: aider from Docker, Claude Code from the host
+
+aider is not installed on the host; the image built for the container test
+works as the runtime. `brain setup aider --docker llm-brain-aider-test:latest`
+prints a shell function; paste it into `~/.bashrc` together with the keys:
+
+```bash
+set -a; . ~/Documents/myProjects/llm_brain/.env; set +a     # OPENROUTER_KEY_* in the shell
+or-aider() { … }                                             # from `brain setup aider --docker …`
+or-claude() { ANTHROPIC_BASE_URL=https://openrouter.ai/api ANTHROPIC_AUTH_TOKEN="$OPENROUTER_KEY_DEV" \
+  ANTHROPIC_MODEL=prism-ml/ternary-bonsai-2-27b ANTHROPIC_DEFAULT_HAIKU_MODEL=prism-ml/ternary-bonsai-2-27b \
+  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 claude "$@"; }
+```
+
+Then, inside any git repo: `or-aider` (architect = reasoning tier, editor =
+fast tier, `/model` to switch) or `or-claude`. Plain `claude` and a plain
+`aider` install keep working as before: the functions only set variables
+for that one invocation. The `dev` key pays, capped at 3 $/day.
+
+The metadata JSON from `brain setup aider` lives at
+`~/.local/share/llm_brain/aider-model-metadata.json`, so aider shows real
+costs for the tier models.
+
+## What brain watches while you work
+
+No proxy yet, so the layer reads what the tools leave on disk:
+
+| Source | What it gives | Where |
+|--------|---------------|-------|
+| aider chat history (`--chat-history-file`) | one `Tokens: N sent, M received` line per LLM round trip, the model, and every notice: `litellm.*Error`, `Retrying…`, `did not conform to the edit format`, `failed to apply` | `$BRAIN_DATA/aider-chat.md` |
+| Claude Code session transcripts | per assistant message: model and `usage` (input, cache read, cache write, output); API errors as `isApiErrorMessage` entries | `~/.claude/projects/*/*.jsonl` |
+| OpenRouter `GET /key` | real spend per profile, day and month | `brain usage snapshot` |
+
+`brain events ingest` reads only the new bytes of each file (offsets in
+SQLite) and `brain events report` prints day × tool × model: requests,
+errors, bad edits, retries, tokens, cache hit, estimated cost from the tier
+prices. Anomaly rules, on purpose simple:
+
+- error rate (errors + bad edits) > 10% on ≥ 5 requests
+- ≥ 3 retries in a day
+- cache hit < 30% on ≥ 10 requests (unstable prefix, or a provider without
+  a prompt cache — the open question on bonsai)
+- > 150k prompt tokens per request (context not trimmed)
+
+Hourly cron, both together:
+
+```
+0 * * * * cd ~/Documents/myProjects/llm_brain && ./target/release/brain usage snapshot >> usage.log 2>&1 && ./target/release/brain events ingest >> usage.log 2>&1
+```
+
+At the end of the week: `brain usage report`, `brain events report --days 7`,
+`brain bench report`. Those three tables are the Phase 0 deliverable.
+
+## Plan for the week (agreed on 2026-09-20)
+
+1. You: aider from Docker and Claude Code from the host, both on the `dev`
+   key, on real work. Switch tier by hand when the fast model struggles.
+2. brain: hourly `usage snapshot` + `events ingest`; you glance at
+   `events report` when something feels off.
+3. Anomalies get a row in the [changelog](./changelog.md) with the cause
+   found (model, tool, prompt shape) — that is the input for Phase 1's
+   sanitizer and escalation rules.
+4. First benchmark rows for both tools on `ago-0001`; more tasks mined as
+   real fixes happen.
+5. **No integration into agent-orchestrator** until the local setup has run
+   for the week: it stays a read-only source of benchmark tasks.
+
 ## Exit criteria (from the roadmap)
 
 - No daily limit ever hit: `usage report` never shows `EXHAUSTED`.
@@ -57,8 +124,9 @@ Tiers as configured (prices from OpenRouter, 2026-09-19):
 
 ## Known gaps, on purpose
 
-- Token counts per request are not collected: `GET /key` reports USD only.
-  Phase 1's proxy reads `usage` from every response.
+- Per-request cost is not collected: `GET /key` reports USD per key only;
+  tokens come from the tools' logs and the cost is estimated from tier
+  prices. Phase 1's proxy reads `usage` from every response.
 - `brain bench mine` (automatic task extraction from git history) is not
   written; the first task (`ago-0001`) was mined by hand.
 - Claude Code's headless flags (`-p … --output-format json
