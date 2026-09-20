@@ -5,6 +5,7 @@ const sidebars = {
     'index',
     'changelog',
     'phase-0',
+    'phase-1',
     'configuration',
     'deploy-vps',
     {

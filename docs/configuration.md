@@ -277,15 +277,16 @@ and by the container test in CI.
 
 | Command | Needs |
 |---------|-------|
-| `brain keys provision [--force] [--only dev,car]` | `OPENROUTER_MANAGEMENT_KEY` |
-| `brain keys list` | `OPENROUTER_MANAGEMENT_KEY` |
+| `brain upstream provision [--force] [--only dev,car]` | `OPENROUTER_MANAGEMENT_KEY` |
+| `brain upstream list` | `OPENROUTER_MANAGEMENT_KEY` |
+| `brain keys create --profile P --name N [--expires DATE] [--ip CIDRs]` / `keys list` / `keys revoke` | the SQLite file (run on the server) |
 | `brain usage snapshot` / `usage report [--days 7]` | `OPENROUTER_KEY_*` |
 | `brain setup claude-code [--profile dev] [--docker IMAGE]` | — |
 | `brain setup aider [--profile dev] [--docker IMAGE]` | — |
 | `brain events ingest [--aider-chat FILE] [--claude-projects DIR]` | the tools' logs |
 | `brain events report [--days 7]` | — |
 | `brain bench run --tool aider\|claude [--tier fast\|reasoning] [--docker IMAGE] [--only id]` — `--tier reasoning` runs aider in architect mode with the fast tier as editor; the settings file is passed if present | `OPENROUTER_KEY_BENCHMARK` |
-| `brain serve [--bind 127.0.0.1:8080] [--refresh 600] [--days 7]` | `OPENROUTER_KEY_*` for snapshots |
+| `brain serve [--bind 127.0.0.1:8080] [--refresh 600] [--days 7]` — proxy (`/v1/*`, key auth) + board | `OPENROUTER_KEY_*` (upstream) |
 | `brain bench report [--run ID]` | — |
 
 Global flags: `--config DIR`, `--db FILE`. Env: `BRAIN_HOME`, `BRAIN_DB`, `BRAIN_DATA`.

@@ -36,7 +36,7 @@ architect = bonsai, editor = deepseek-v4-flash.
 1. **OpenRouter account**: load a fixed amount of credits (≈ 40 €: the hard
    monthly wall) and create a **management key**.
 2. `cp .env.example .env && chmod 600 .env`, put the management key in it.
-3. `cargo run -p brain -- keys provision` → paste the printed
+3. `cargo run -p brain -- upstream provision` → paste the printed
    `OPENROUTER_KEY_*=` lines into `.env`, then **remove the management key**.
    Check on the OpenRouter dashboard: five keys named `llm_brain/<profile>`,
    each with a daily limit.

@@ -4,8 +4,9 @@ title: Authentication flow (client ↔ llm_brain)
 
 # Authentication flow: who can hold credentials and how they are used
 
-Yes, this pattern has to be **built**, but it's small: one table, one
-axum middleware, four `clap` subcommands. A few hundred lines of Rust. This page
+**Built on 2026-09-20** ([Phase 1 runbook](../phase-1.md)): one table, one
+axum middleware, three `clap` subcommands, a few hundred lines of Rust
+with end-to-end tests against a mock upstream. This page
 describes the exact interactions and what guarantees that **only who you
 decide** can hold and use a key.
 

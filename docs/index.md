@@ -140,7 +140,11 @@ All diagrams, with sources in `diagrams/`: → [Diagrams](./diagrams.md)
 
 ## Where we are
 
-**Phase 0 is running**: the `brain` CLI provisions per-profile OpenRouter
+**Phase 1 is built** (2026-09-20): the proxy — every `/v1/*` request needs a
+`brain_<profile>_…` key, rate limits, daily/monthly budget with
+degradation, streaming untouched, per-request cost. → [Phase 1 runbook](./phase-1.md)
+
+**Phase 0 ran first**: the `brain` CLI provisions per-profile OpenRouter
 keys with daily limits, snapshots spend, prints the client setup, ingests
 the tools' logs for errors and anomalies, and runs the benchmark suite;
 every piece has tests, including the real `aider` in a container.
