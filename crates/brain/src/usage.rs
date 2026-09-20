@@ -9,13 +9,28 @@ use anyhow::Result;
 use chrono::Utc;
 use std::collections::HashMap;
 
-/// Takes one snapshot per profile that has a key in `env`. Profiles without a
-/// key are reported in the returned `missing` list, not treated as errors.
+/// Takes one snapshot per profile that has a key in `env` and stores them.
+/// Profiles without a key are reported in the returned `missing` list, not
+/// treated as errors.
 pub async fn snapshot(
     cfg: &Config,
     env: &HashMap<String, String>,
     client: &Client,
     db: &Db,
+) -> Result<(Vec<Snapshot>, Vec<String>)> {
+    let (taken, missing) = fetch(cfg, env, client).await?;
+    for s in &taken {
+        db.insert_snapshot(s)?;
+    }
+    Ok((taken, missing))
+}
+
+/// Network half of [`snapshot`]: no database borrow across awaits, so it can
+/// run inside a spawned task.
+pub async fn fetch(
+    cfg: &Config,
+    env: &HashMap<String, String>,
+    client: &Client,
 ) -> Result<(Vec<Snapshot>, Vec<String>)> {
     let mut taken = Vec::new();
     let mut missing = Vec::new();
@@ -35,7 +50,6 @@ pub async fn snapshot(
             limit: info.limit,
             limit_remaining: info.limit_remaining,
         };
-        db.insert_snapshot(&s)?;
         taken.push(s);
     }
     Ok((taken, missing))

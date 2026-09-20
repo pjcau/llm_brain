@@ -293,11 +293,19 @@ impl DailyStat {
     }
 }
 
+/// Traffic that never touches OpenRouter: Claude Code on the claude.ai
+/// subscription (`claude-*` models) and its synthetic error entries. Shown
+/// in the tables, excluded from the anomaly rules, which are about the
+/// cheap-model setup.
+pub fn is_subscription(model: &str) -> bool {
+    model.starts_with("claude-") || model == "<synthetic>"
+}
+
 /// Anomaly rules for Phase 0. Thresholds are deliberately simple; they are
 /// the questions the week must answer.
 pub fn anomalies(stats: &[DailyStat]) -> Vec<String> {
     let mut out = Vec::new();
-    for s in stats {
+    for s in stats.iter().filter(|s| !is_subscription(&s.model)) {
         let who = format!("{} {} {}", s.day, s.source, s.model);
         if s.requests >= 5 && s.error_rate() > 0.10 {
             out.push(format!(
@@ -384,6 +392,89 @@ pub fn render_report(cfg: &Config, stats: &[DailyStat]) -> String {
         }
     }
     out
+}
+
+/// Where the tools' logs live.
+pub struct IngestPaths {
+    pub aider_chat: std::path::PathBuf,
+    /// Roots that contain `<project>/<session>.jsonl` (host and Docker HOMEs).
+    pub claude_roots: Vec<std::path::PathBuf>,
+}
+
+impl IngestPaths {
+    pub fn from_env(
+        env: &std::collections::HashMap<String, String>,
+        aider_chat: Option<std::path::PathBuf>,
+        claude_projects: Option<std::path::PathBuf>,
+    ) -> Self {
+        let home = env.get("HOME").cloned().unwrap_or_default();
+        let data = env
+            .get("BRAIN_DATA")
+            .cloned()
+            .unwrap_or_else(|| format!("{home}/.local/share/llm_brain"));
+        let aider_chat =
+            aider_chat.unwrap_or_else(|| std::path::PathBuf::from(format!("{data}/aider-chat.md")));
+        let host_projects = claude_projects
+            .unwrap_or_else(|| std::path::PathBuf::from(format!("{home}/.claude/projects")));
+        let docker_projects =
+            std::path::PathBuf::from(format!("{data}/claude-home/.claude/projects"));
+        let mut claude_roots = vec![host_projects];
+        if let Some(extra) = env.get("BRAIN_CLAUDE_PROJECTS") {
+            claude_roots.push(std::path::PathBuf::from(extra));
+        }
+        claude_roots.push(docker_projects);
+        Self {
+            aider_chat,
+            claude_roots,
+        }
+    }
+}
+
+/// Incremental ingest of every known log into `db`; returns the number of
+/// events added. Missing or unreadable files are skipped with a note.
+pub fn ingest(db: &crate::db::Db, paths: &IngestPaths) -> Result<usize> {
+    let mut total = 0;
+    if paths.aider_chat.is_file() {
+        let key = paths.aider_chat.to_string_lossy().to_string();
+        let (offset, hint) = db.ingest_state(&key)?;
+        let (text, new_offset) = read_from(&paths.aider_chat, offset)?;
+        let (ev, model) = parse_aider_chat(&text, &hint);
+        total += db.insert_events(&ev)?;
+        db.set_ingest_state(&key, new_offset, &model)?;
+    }
+    let mut sessions = Vec::new();
+    for root in &paths.claude_roots {
+        let Ok(projects) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for project in projects.flatten() {
+            if let Ok(files) = std::fs::read_dir(project.path()) {
+                sessions.extend(
+                    files
+                        .flatten()
+                        .map(|f| f.path())
+                        .filter(|p| p.extension().is_some_and(|e| e == "jsonl")),
+                );
+            }
+        }
+    }
+    for path in sessions {
+        let key = path.to_string_lossy().to_string();
+        let (offset, _) = db.ingest_state(&key)?;
+        let (text, new_offset) = match read_from(&path, offset) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("skipping {}: {e:#}", path.display());
+                continue;
+            }
+        };
+        if new_offset == offset {
+            continue;
+        }
+        total += db.insert_events(&parse_claude_session(&text))?;
+        db.set_ingest_state(&key, new_offset, "")?;
+    }
+    Ok(total)
 }
 
 /// Reads the part of `path` after `offset` (append-only files).
@@ -509,6 +600,13 @@ pong
             "{a:?}"
         );
         assert!(anomalies(std::slice::from_ref(&good)).is_empty());
+        // subscription traffic is never an anomaly of the cheap-model setup
+        let sub = DailyStat {
+            model: "claude-opus-5".into(),
+            ..bad.clone()
+        };
+        assert!(anomalies(std::slice::from_ref(&sub)).is_empty());
+        assert!(is_subscription("<synthetic>") && !is_subscription("deepseek/deepseek-v4-flash"));
         // estimated cost from tier prices: cached reads at 0.25×
         let c = good.est_cost(&cfg()).unwrap();
         let expected =
@@ -517,6 +615,66 @@ pong
         let r = render_report(&cfg(), &[good]);
         assert!(r.contains("94%"), "{r}");
         assert!(render_report(&cfg(), &[]).contains("no events yet"));
+    }
+
+    #[test]
+    fn ingest_is_incremental_across_aider_and_claude_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let aider = dir.path().join("aider-chat.md");
+        std::fs::write(&aider, CHAT).unwrap();
+        let proj = dir.path().join("projects/p1");
+        std::fs::create_dir_all(&proj).unwrap();
+        let sess = proj.join("s.jsonl");
+        std::fs::write(&sess, r#"{"type":"assistant","timestamp":"2026-09-19T09:13:34.802Z","sessionId":"s1","message":{"model":"m","usage":{"input_tokens":2,"output_tokens":5}}}"#).unwrap();
+        let db = crate::db::Db::memory().unwrap();
+        let paths = IngestPaths {
+            aider_chat: aider.clone(),
+            claude_roots: vec![dir.path().join("projects"), dir.path().join("missing")],
+        };
+        assert_eq!(ingest(&db, &paths).unwrap(), 6, "5 aider events + 1 claude");
+        assert_eq!(ingest(&db, &paths).unwrap(), 0, "nothing new");
+        // append to both files: only the new lines are read, model hint kept
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&aider)
+            .unwrap();
+        std::io::Write::write_all(&mut f, b"> Tokens: 5 sent, 1 received.\n").unwrap();
+        let mut g = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&sess)
+            .unwrap();
+        std::io::Write::write_all(&mut g, b"\n{\"type\":\"assistant\",\"timestamp\":\"2026-09-19T09:14:00.000Z\",\"sessionId\":\"s1\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}").unwrap();
+        assert_eq!(ingest(&db, &paths).unwrap(), 2);
+        let stats = db.daily_stats(3650).unwrap();
+        let aider_stat = stats.iter().find(|s| s.source == "aider").unwrap();
+        assert_eq!(aider_stat.model, "openai/prism-ml/ternary-bonsai-2-27b");
+        assert_eq!(aider_stat.requests, 3);
+    }
+
+    #[test]
+    fn paths_from_env_default_to_data_dir_and_both_claude_homes() {
+        let env = std::collections::HashMap::from([("HOME".to_string(), "/h".to_string())]);
+        let p = IngestPaths::from_env(&env, None, None);
+        assert_eq!(
+            p.aider_chat,
+            std::path::PathBuf::from("/h/.local/share/llm_brain/aider-chat.md")
+        );
+        assert_eq!(
+            p.claude_roots,
+            vec![
+                std::path::PathBuf::from("/h/.claude/projects"),
+                std::path::PathBuf::from("/h/.local/share/llm_brain/claude-home/.claude/projects")
+            ]
+        );
+        let env2 = std::collections::HashMap::from([
+            ("HOME".to_string(), "/h".to_string()),
+            ("BRAIN_DATA".to_string(), "/d".to_string()),
+            ("BRAIN_CLAUDE_PROJECTS".to_string(), "/x".to_string()),
+        ]);
+        let p2 = IngestPaths::from_env(&env2, Some("/a.md".into()), None);
+        assert_eq!(p2.aider_chat, std::path::PathBuf::from("/a.md"));
+        assert_eq!(p2.claude_roots.len(), 3);
+        assert_eq!(p2.claude_roots[1], std::path::PathBuf::from("/x"));
     }
 
     #[test]

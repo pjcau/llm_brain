@@ -6,6 +6,7 @@
 
 mod bench;
 mod config;
+mod dashboard;
 mod db;
 mod events;
 mod keys;
@@ -50,6 +51,16 @@ enum Cmd {
     Setup {
         #[command(subcommand)]
         cmd: SetupCmd,
+    },
+    /// The board: HTML on /, JSON on /api/summary; refreshes usage + events itself
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        bind: String,
+        /// Seconds between automatic `usage snapshot` + `events ingest`
+        #[arg(long, default_value_t = 600)]
+        refresh: u64,
+        #[arg(long, default_value_t = 7)]
+        days: u32,
     },
     /// Errors, tokens and anomalies from the tools' own logs
     Events {
@@ -268,6 +279,55 @@ async fn main() -> Result<()> {
                 );
             }
         },
+        Cmd::Serve {
+            bind,
+            refresh,
+            days,
+        } => {
+            let state = dashboard::AppState {
+                cfg: std::sync::Arc::new(cfg.clone()),
+                db_path: db_path.clone(),
+                days,
+            };
+            // refresh loop: snapshot (if keys) + ingest (if logs), errors logged, never fatal
+            let (cfg_bg, env_bg, client_bg, db_bg) =
+                (cfg.clone(), env.clone(), client.clone(), db_path.clone());
+            tokio::spawn(async move {
+                let paths = events::IngestPaths::from_env(&env_bg, None, None);
+                loop {
+                    // network first (no db borrow across awaits), then a short sync write
+                    let fetched = usage::fetch(&cfg_bg, &env_bg, &client_bg).await;
+                    match db::Db::open(&db_bg) {
+                        Ok(db) => {
+                            match fetched {
+                                Ok((taken, _)) => {
+                                    let n = taken.len();
+                                    if let Err(e) =
+                                        taken.iter().try_for_each(|s| db.insert_snapshot(s))
+                                    {
+                                        eprintln!("refresh: storing snapshots failed: {e:#}");
+                                    } else {
+                                        eprintln!("refresh: {n} usage snapshot(s)");
+                                    }
+                                }
+                                Err(e) => eprintln!("refresh: usage snapshot failed: {e:#}"),
+                            }
+                            match events::ingest(&db, &paths) {
+                                Ok(n) => eprintln!("refresh: {n} event(s) ingested"),
+                                Err(e) => eprintln!("refresh: ingest failed: {e:#}"),
+                            }
+                        }
+                        Err(e) => eprintln!("refresh: cannot open db: {e:#}"),
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(refresh.max(30))).await;
+                }
+            });
+            let listener = tokio::net::TcpListener::bind(&bind)
+                .await
+                .with_context(|| format!("binding {bind}"))?;
+            eprintln!("llm_brain board on http://{bind}/  (refresh every {refresh}s)");
+            axum::serve(listener, dashboard::router(state)).await?;
+        }
         Cmd::Events { cmd } => {
             let db = db::Db::open(&db_path)?;
             match cmd {
@@ -275,63 +335,8 @@ async fn main() -> Result<()> {
                     aider_chat,
                     claude_projects,
                 } => {
-                    let home = env.get("HOME").cloned().unwrap_or_default();
-                    let data = env
-                        .get("BRAIN_DATA")
-                        .cloned()
-                        .unwrap_or_else(|| format!("{home}/.local/share/llm_brain"));
-                    let aider_chat = aider_chat
-                        .unwrap_or_else(|| PathBuf::from(format!("{data}/aider-chat.md")));
-                    let claude_projects = claude_projects
-                        .unwrap_or_else(|| PathBuf::from(format!("{home}/.claude/projects")));
-                    let mut total = 0;
-                    if aider_chat.is_file() {
-                        let key = aider_chat.to_string_lossy().to_string();
-                        let (offset, hint) = db.ingest_state(&key)?;
-                        let (text, new_offset) = events::read_from(&aider_chat, offset)?;
-                        let (ev, model) = events::parse_aider_chat(&text, &hint);
-                        total += db.insert_events(&ev)?;
-                        db.set_ingest_state(&key, new_offset, &model)?;
-                    } else {
-                        eprintln!(
-                            "no aider chat history at {} (use `brain setup aider`)",
-                            aider_chat.display()
-                        );
-                    }
-                    let mut sessions = Vec::new();
-                    let docker_projects =
-                        PathBuf::from(format!("{data}/claude-home/.claude/projects"));
-                    for root in [&claude_projects, &docker_projects] {
-                        if !root.is_dir() {
-                            continue;
-                        }
-                        for project in std::fs::read_dir(root)?.flatten() {
-                            if let Ok(files) = std::fs::read_dir(project.path()) {
-                                sessions.extend(
-                                    files
-                                        .flatten()
-                                        .map(|f| f.path())
-                                        .filter(|p| p.extension().is_some_and(|e| e == "jsonl")),
-                                );
-                            }
-                        }
-                    }
-                    for path in sessions {
-                        let key = path.to_string_lossy().to_string();
-                        let (offset, _) = db.ingest_state(&key)?;
-                        let (text, new_offset) = match events::read_from(&path, offset) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                eprintln!("skipping {}: {e:#}", path.display());
-                                continue;
-                            }
-                        };
-                        if new_offset == offset {
-                            continue;
-                        }
-                        total += db.insert_events(&events::parse_claude_session(&text))?;
-                        db.set_ingest_state(&key, new_offset, "")?;
-                    }
+                    let paths = events::IngestPaths::from_env(&env, aider_chat, claude_projects);
+                    let total = events::ingest(&db, &paths)?;
                     println!("ingested {total} event(s)");
                 }
                 EventsCmd::Report { days } => {
@@ -388,6 +393,24 @@ async fn main() -> Result<()> {
                         program_override: None,
                         docker_image: docker,
                         log_dir: logs,
+                        aider: {
+                            // mirror `brain setup aider`: architect mode when running the reasoning tier,
+                            // fallback chains if the settings file exists
+                            let editor_model = (tier == "reasoning")
+                                .then(|| cfg.model_for_tier("fast").ok().map(String::from))
+                                .flatten();
+                            let home = env.get("HOME").cloned().unwrap_or_default();
+                            let data = env
+                                .get("BRAIN_DATA")
+                                .cloned()
+                                .unwrap_or_else(|| format!("{home}/.local/share/llm_brain"));
+                            let settings =
+                                PathBuf::from(format!("{data}/aider-model-settings.yml"));
+                            bench::tool::AiderOptions {
+                                editor_model,
+                                settings_file: settings.is_file().then_some(settings),
+                            }
+                        },
                     };
                     eprintln!(
                         "run {run_id}: {} task(s), {} on {}",

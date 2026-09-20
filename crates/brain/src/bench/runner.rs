@@ -3,7 +3,7 @@
 //! the delta of the benchmark key's `usage` (OpenRouter reports USD), record.
 
 use super::task::Task;
-use super::tool::{Endpoint, Tool, ToolInvocation, dockerize, invocation};
+use super::tool::{AiderOptions, Endpoint, Tool, ToolInvocation, dockerize, invocation};
 use crate::db::{BenchRun, Db};
 use crate::openrouter::Client;
 use anyhow::{Context, Result, bail};
@@ -28,6 +28,8 @@ pub struct RunOptions {
     pub docker_image: Option<String>,
     /// Where the tool's stdout/stderr of every task are saved (`<log_dir>/<run_id>/<task>.{out,err}`).
     pub log_dir: PathBuf,
+    /// aider: architect/editor split and the fallback settings file.
+    pub aider: AiderOptions,
 }
 
 #[derive(Debug)]
@@ -111,10 +113,17 @@ async fn run_task(opts: &RunOptions, task: &Task) -> Result<Outcome> {
         &opts.model,
         &task.prompt,
         &opts.run_id,
+        &opts.aider,
     );
     if let Some(image) = opts.docker_image.as_deref() {
         let cache = std::fs::canonicalize(&opts.cache_dir)?;
-        inv = dockerize(&inv, image, work.path(), &cache, &host_uid_gid());
+        let extra: Vec<PathBuf> = opts
+            .aider
+            .settings_file
+            .iter()
+            .filter_map(|f| f.parent().map(Path::to_path_buf))
+            .collect();
+        inv = dockerize(&inv, image, work.path(), &cache, &host_uid_gid(), &extra);
     }
     let log_base = opts.log_dir.join(&opts.run_id);
     std::fs::create_dir_all(&log_base)?;
@@ -434,6 +443,7 @@ mod tests {
             program_override: Some(program.into_iter().map(String::from).collect()),
             docker_image: None,
             log_dir: cache.join("runs"),
+            aider: AiderOptions::default(),
         }
     }
 

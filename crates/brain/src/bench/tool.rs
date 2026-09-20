@@ -4,7 +4,7 @@
 
 use clap::ValueEnum;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Tool {
@@ -48,6 +48,16 @@ impl Endpoint {
     }
 }
 
+/// aider-specific knobs mirrored from `brain setup aider`.
+#[derive(Debug, Clone, Default)]
+pub struct AiderOptions {
+    /// `--architect --model <model> --editor-model <editor>`: the reasoning
+    /// tier proposes, the fast tier applies the edits.
+    pub editor_model: Option<String>,
+    /// `--model-settings-file`: OpenRouter fallback chains per model.
+    pub settings_file: Option<PathBuf>,
+}
+
 /// Builds the headless invocation for `tool` with `model`, working in the
 /// task's worktree (the caller sets the cwd).
 pub fn invocation(
@@ -56,6 +66,7 @@ pub fn invocation(
     model: &str,
     prompt: &str,
     run_id: &str,
+    aider: &AiderOptions,
 ) -> ToolInvocation {
     let mut env = BTreeMap::new();
     match tool {
@@ -63,20 +74,32 @@ pub fn invocation(
             env.insert("OPENAI_API_BASE".into(), endpoint.openai_base.clone());
             env.insert("OPENAI_API_KEY".into(), endpoint.api_key.clone());
             // aider reads OPENAI_API_BASE via LiteLLM; the model needs the openai/ prefix
+            let mut args: Vec<String> = Vec::new();
+            if let Some(editor) = aider.editor_model.as_deref() {
+                args.extend([
+                    "--architect".into(),
+                    "--editor-model".into(),
+                    format!("openai/{editor}"),
+                ]);
+            }
+            if let Some(f) = aider.settings_file.as_deref() {
+                args.extend(["--model-settings-file".into(), f.display().to_string()]);
+            }
+            args.extend(vec![
+                "--model".into(),
+                format!("openai/{model}"),
+                "--message".into(),
+                prompt.to_string(),
+                "--yes-always".into(),
+                "--no-show-model-warnings".into(),
+                "--no-check-update".into(),
+                "--no-analytics".into(),
+                "--no-auto-commits".into(),
+                "--no-stream".into(),
+            ]);
             ToolInvocation {
                 program: "aider".into(),
-                args: vec![
-                    "--model".into(),
-                    format!("openai/{model}"),
-                    "--message".into(),
-                    prompt.to_string(),
-                    "--yes-always".into(),
-                    "--no-show-model-warnings".into(),
-                    "--no-check-update".into(),
-                    "--no-analytics".into(),
-                    "--no-auto-commits".into(),
-                    "--no-stream".into(),
-                ],
+                args,
                 env,
             }
         }
@@ -119,6 +142,7 @@ pub fn dockerize(
     worktree: &Path,
     cache: &Path,
     uid_gid: &str,
+    extra_ro: &[PathBuf],
 ) -> ToolInvocation {
     let mut args: Vec<String> = vec![
         "run".into(),
@@ -134,6 +158,10 @@ pub fn dockerize(
         "-w".into(),
         worktree.display().to_string(),
     ];
+    for p in extra_ro {
+        args.push("-v".into());
+        args.push(format!("{0}:{0}:ro", p.display()));
+    }
     for (k, v) in &inv.env {
         args.push("-e".into());
         args.push(format!("{k}={v}"));
@@ -160,6 +188,7 @@ mod tests {
             "prism-ml/ternary-bonsai-2-27b",
             "fix it",
             "r1",
+            &AiderOptions::default(),
         );
         assert_eq!(inv.program, "aider");
         assert_eq!(inv.env["OPENAI_API_BASE"], "https://openrouter.ai/api/v1");
@@ -179,6 +208,7 @@ mod tests {
             "m",
             "fix it",
             "r1",
+            &AiderOptions::default(),
         );
         let d = dockerize(
             &inv,
@@ -186,6 +216,7 @@ mod tests {
             Path::new("/tmp/wt-1"),
             Path::new("/repo/cache"),
             "1000:1000",
+            &[PathBuf::from("/data/llm_brain")],
         );
         assert_eq!(d.program, "docker");
         assert!(
@@ -198,7 +229,7 @@ mod tests {
             "{a}"
         );
         assert!(
-            a.contains("-v /tmp/wt-1:/tmp/wt-1 -v /repo/cache:/repo/cache -w /tmp/wt-1"),
+            a.contains("-v /tmp/wt-1:/tmp/wt-1 -v /repo/cache:/repo/cache -w /tmp/wt-1 -v /data/llm_brain:/data/llm_brain:ro"),
             "{a}"
         );
         assert!(
@@ -216,6 +247,27 @@ mod tests {
     }
 
     #[test]
+    fn aider_architect_mode_and_settings_file_are_passed_through() {
+        let opts = AiderOptions {
+            editor_model: Some("deepseek/deepseek-v4-flash".into()),
+            settings_file: Some(PathBuf::from("/data/s.yml")),
+        };
+        let inv = invocation(
+            Tool::Aider,
+            &Endpoint::openrouter("k"),
+            "prism-ml/ternary-bonsai-2-27b",
+            "p",
+            "r",
+            &opts,
+        );
+        let a = inv.args.join(" ");
+        assert!(
+            a.starts_with("--architect --editor-model openai/deepseek/deepseek-v4-flash --model-settings-file /data/s.yml --model openai/prism-ml/ternary-bonsai-2-27b"),
+            "{a}"
+        );
+    }
+
+    #[test]
     fn claude_gets_anthropic_env_sanitizer_flags_and_run_header() {
         let inv = invocation(
             Tool::Claude,
@@ -223,6 +275,7 @@ mod tests {
             "deepseek/deepseek-v4-pro",
             "fix it",
             "run-42",
+            &AiderOptions::default(),
         );
         assert_eq!(inv.program, "claude");
         assert_eq!(inv.env["ANTHROPIC_BASE_URL"], "https://openrouter.ai/api");

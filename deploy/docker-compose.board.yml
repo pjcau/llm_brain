@@ -1,0 +1,26 @@
+# Local board: http://127.0.0.1:8090/
+#   docker compose -f deploy/docker-compose.board.yml up -d --build
+# Mounts the repo's config + SQLite (rw) and the tools' logs (ro). Keys come
+# from .env (usage snapshots); no key is baked into the image.
+services:
+  board:
+    build:
+      context: ..
+      dockerfile: docker/brain.Dockerfile
+    image: llm-brain:local
+    container_name: llm-brain-board
+    env_file: ../.env
+    environment:
+      BRAIN_HOME: /brain
+      BRAIN_DB: /brain/data/brain.db
+      BRAIN_DATA: /data/llm_brain
+      BRAIN_CLAUDE_PROJECTS: /data/claude-projects
+      HOME: /home/brain
+    volumes:
+      - ../config:/brain/config:ro
+      - ../data:/brain/data
+      - ${HOME}/.local/share/llm_brain:/data/llm_brain:ro
+      - ${HOME}/.claude/projects:/data/claude-projects:ro
+    ports:
+      - "127.0.0.1:8090:8080"
+    restart: unless-stopped
