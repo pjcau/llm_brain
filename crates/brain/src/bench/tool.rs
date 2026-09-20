@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 pub enum Tool {
     Aider,
     Claude,
+    Opencode,
 }
 
 impl Tool {
@@ -17,6 +18,7 @@ impl Tool {
         match self {
             Tool::Aider => "aider",
             Tool::Claude => "claude",
+            Tool::Opencode => "opencode",
         }
     }
 }
@@ -26,6 +28,8 @@ pub struct ToolInvocation {
     pub program: String,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
+    /// Files the runner writes into the worktree before spawning (relative path, content).
+    pub files: Vec<(String, String)>,
 }
 
 /// Where the tool sends requests. Phase 0: OpenRouter; later: llm_brain.
@@ -101,6 +105,38 @@ pub fn invocation(
                 program: "aider".into(),
                 args,
                 env,
+                files: vec![],
+            }
+        }
+        Tool::Opencode => {
+            // provider `brain` = the OpenAI-compatible endpoint; model key = the id as-is,
+            // so `--model brain/<id>` (OpenCode splits provider/model on the first slash)
+            env.insert("OPENAI_API_KEY".into(), endpoint.api_key.clone());
+            let config = serde_json::json!({
+                "$schema": "https://opencode.ai/config.json",
+                "provider": {"brain": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "llm_brain",
+                    "options": {"baseURL": endpoint.openai_base, "apiKey": "{env:OPENAI_API_KEY}"},
+                    "models": {model: {"name": model, "limit": {"context": 262144, "output": 16384}}}
+                }}
+            });
+            ToolInvocation {
+                program: "opencode".into(),
+                args: vec![
+                    "run".into(),
+                    "--model".into(),
+                    format!("brain/{model}"),
+                    "--format".into(),
+                    "json".into(),
+                    "--auto".into(),
+                    prompt.to_string(),
+                ],
+                env,
+                files: vec![(
+                    "opencode.json".into(),
+                    serde_json::to_string_pretty(&config).unwrap_or_default(),
+                )],
             }
         }
         Tool::Claude => {
@@ -127,6 +163,7 @@ pub fn invocation(
                     "acceptEdits".into(),
                 ],
                 env,
+                files: vec![],
             }
         }
     }
@@ -175,6 +212,7 @@ pub fn dockerize(
         program: "docker".into(),
         args,
         env: inv.env.clone(),
+        files: inv.files.clone(),
     }
 }
 
@@ -267,6 +305,39 @@ mod tests {
             a.starts_with("--architect --editor-model openai/deepseek/deepseek-v4-flash --model-settings-file /data/s.yml --model openai/prism-ml/ternary-bonsai-2-27b"),
             "{a}"
         );
+    }
+
+    #[test]
+    fn opencode_gets_a_provider_config_file_and_a_prefixed_model() {
+        let inv = invocation(
+            Tool::Opencode,
+            &Endpoint::openrouter("sk-b"),
+            "deepseek/deepseek-v4-flash",
+            "fix it",
+            "r1",
+            &AiderOptions::default(),
+        );
+        assert_eq!(inv.program, "opencode");
+        assert_eq!(inv.env["OPENAI_API_KEY"], "sk-b");
+        let a = inv.args.join(" ");
+        assert!(
+            a.starts_with(
+                "run --model brain/deepseek/deepseek-v4-flash --format json --auto fix it"
+            ),
+            "{a}"
+        );
+        assert_eq!(inv.files.len(), 1);
+        assert_eq!(inv.files[0].0, "opencode.json");
+        let cfg: serde_json::Value = serde_json::from_str(&inv.files[0].1).unwrap();
+        assert_eq!(
+            cfg["provider"]["brain"]["options"]["baseURL"],
+            "https://openrouter.ai/api/v1"
+        );
+        assert_eq!(
+            cfg["provider"]["brain"]["options"]["apiKey"], "{env:OPENAI_API_KEY}",
+            "the key never lands in the file"
+        );
+        assert!(cfg["provider"]["brain"]["models"]["deepseek/deepseek-v4-flash"].is_object());
     }
 
     #[test]

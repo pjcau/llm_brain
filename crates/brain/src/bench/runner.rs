@@ -125,6 +125,14 @@ async fn run_task(opts: &RunOptions, task: &Task) -> Result<Outcome> {
             .collect();
         inv = dockerize(&inv, image, work.path(), &cache, &host_uid_gid(), &extra);
     }
+    // tool-specific files (e.g. OpenCode's provider config) go into the worktree first
+    for (rel, content) in &inv.files {
+        let path = work.path().join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, content)?;
+    }
     let log_base = opts.log_dir.join(&opts.run_id);
     std::fs::create_dir_all(&log_base)?;
     let log_prefix = log_base.join(&task.id);
