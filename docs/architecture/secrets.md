@@ -109,6 +109,22 @@ options in short:
 
 Until the decision was taken, llm_brain listened only on `127.0.0.1`.
 
+## How the CLI handles secrets (Phase 0, verified in code)
+
+| Command | Behaviour |
+|---------|-----------|
+| `brain keys provision` | reads the management key from the env for that call only; prints the new keys **once** as `.env` lines; stores nothing |
+| `brain usage`, `brain serve` | read `OPENROUTER_KEY_*` from the env, send them only as `Bearer` to OpenRouter; SQLite holds numbers, logs hold counts |
+| `brain setup …` | prints `"$OPENROUTER_KEY_DEV"` as a variable reference, never a value |
+| `brain events ingest` | stores at most 200 chars of error text from the tools' logs; no keys appear there |
+| `brain bench --docker` | passes `-e NAME` (no value) to `docker run`, so the key is inherited from the process env and never shows in `ps` |
+| board `/api/summary` | spend, models, runs — no keys; basic auth in front on the VPS |
+
+Trade-off to know: sourcing `.env` in `~/.bashrc` puts the keys in every
+shell's environment, readable by any process you run as your user. That is
+the usual laptop compromise; the stricter alternative is `apiKeyHelper` /
+`pass` per tool.
+
 ## Things we don't do
 
 - No OpenRouter key in a client, ever, not even "to try".

@@ -85,7 +85,7 @@ systemctl stop brain && curl -fsSLo /opt/llm_brain/brain https://github.com/pjca
 ## What is exposed
 
 Caddy on 80/443 with automatic HTTPS, everything else closed by ufw;
-`brain` listens on `127.0.0.1:8080` only. The board has no auth yet: until
-the Phase 1 key middleware exists, keep it behind Tailscale or limit it in
-the Caddyfile (`@lan remote_ip <your-ip>`), or accept that it shows spend
-figures only.
+`brain` listens on `127.0.0.1:8080` only. The board is behind **basic
+auth in Caddy** (bcrypt hash in the Caddyfile, credentials kept in the
+git-ignored `deploy/server.local.env`); `/health` stays open. The Phase 1
+key middleware will replace it for the API routes.

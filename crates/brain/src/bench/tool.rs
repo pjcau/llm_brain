@@ -162,9 +162,11 @@ pub fn dockerize(
         args.push("-v".into());
         args.push(format!("{0}:{0}:ro", p.display()));
     }
-    for (k, v) in &inv.env {
+    // `-e NAME` without a value: docker copies it from the calling process's
+    // environment, so the key never appears on the command line (`ps`).
+    for k in inv.env.keys() {
         args.push("-e".into());
-        args.push(format!("{k}={v}"));
+        args.push(k.clone());
     }
     args.push(image.into());
     args.push(inv.program.clone());
@@ -172,7 +174,7 @@ pub fn dockerize(
     ToolInvocation {
         program: "docker".into(),
         args,
-        env: BTreeMap::new(),
+        env: inv.env.clone(),
     }
 }
 
@@ -219,9 +221,9 @@ mod tests {
             &[PathBuf::from("/data/llm_brain")],
         );
         assert_eq!(d.program, "docker");
-        assert!(
-            d.env.is_empty(),
-            "env travels as -e flags, not as process env"
+        assert_eq!(
+            d.env, inv.env,
+            "env stays on the docker process, inherited by the container"
         );
         let a = d.args.join(" ");
         assert!(
@@ -232,11 +234,11 @@ mod tests {
             a.contains("-v /tmp/wt-1:/tmp/wt-1 -v /repo/cache:/repo/cache -w /tmp/wt-1 -v /data/llm_brain:/data/llm_brain:ro"),
             "{a}"
         );
+        assert!(a.contains("-e OPENAI_API_BASE -e OPENAI_API_KEY"), "{a}");
         assert!(
-            a.contains("-e OPENAI_API_BASE=https://openrouter.ai/api/v1"),
-            "{a}"
+            !a.contains("sk-b"),
+            "the key must never be on the docker command line: {a}"
         );
-        assert!(a.contains("-e OPENAI_API_KEY=sk-b"), "{a}");
         let i = d
             .args
             .iter()
