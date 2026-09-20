@@ -522,6 +522,15 @@ async fn proxy(
 
     // rate limits
     if st.rate_limited(&key, &user) {
+        st.record(rejection(
+            &profile,
+            &key,
+            &user,
+            dialect,
+            429,
+            "rate-limited",
+            started,
+        ));
         return rate_error(
             dialect,
             "rate limit: slow down (per key / per user)",
@@ -556,6 +565,9 @@ async fn proxy(
     };
     match decision.action {
         Action::Block => {
+            st.record(rejection(
+                &profile, &key, &user, dialect, 429, "blocked", started,
+            ));
             return rate_error(
                 dialect,
                 &format!(
@@ -746,6 +758,37 @@ async fn proxy(
     resp
 }
 
+/// A request the proxy refused before forwarding: zero tokens, no cost,
+/// but visible in the board with its reason.
+fn rejection(
+    profile: &crate::config::Profile,
+    key: &ApiKey,
+    user: &str,
+    dialect: Dialect,
+    status: i64,
+    reason: &str,
+    started: Instant,
+) -> RequestRow {
+    RequestRow {
+        ts: Utc::now(),
+        profile: profile.name.clone(),
+        key_prefix: key.prefix.clone(),
+        user: user.to_string(),
+        dialect: dialect.as_str().into(),
+        tier: String::new(),
+        model: String::new(),
+        status,
+        input_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0.0,
+        latency_ms: started.elapsed().as_millis() as i64,
+        stream: false,
+        degraded: reason.to_string(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn row(
     profile: &crate::config::Profile,
@@ -888,7 +931,16 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        panic!("expected {n} request rows");
+        let db = Db::open(db_path).unwrap();
+        let all: Vec<(i64, String)> = db
+            .conn_for_tests()
+            .prepare("SELECT status, degraded FROM requests")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        panic!("expected {n} request rows, have {all:?}");
     }
 
     #[tokio::test]
@@ -1179,12 +1231,18 @@ mod tests {
                 .unwrap()
                 .contains("budget exhausted")
         );
-        let rows = wait_rows(&h.db_path, 5).await;
+        // 3 manual spend rows + fast-only + max-tokens + the recorded refusal
+        let rows = wait_rows(&h.db_path, 6).await;
         assert_eq!(rows.iter().filter(|r| r.degraded == "fast-only").count(), 1);
         assert_eq!(
             rows.iter().filter(|r| r.degraded == "max-tokens").count(),
             1
         );
+        let blocked = rows
+            .iter()
+            .find(|r| r.degraded == "blocked")
+            .expect("the refusal is recorded");
+        assert_eq!((blocked.status, blocked.cost_usd), (429, 0.0));
     }
 
     #[tokio::test]
@@ -1217,6 +1275,12 @@ mod tests {
         let r = call().await.unwrap();
         assert_eq!(r.status(), 429);
         assert_eq!(r.headers().get("x-should-retry").unwrap(), "true");
+        let rows = wait_rows(&h.db_path, 3).await;
+        assert_eq!(
+            rows.iter().filter(|r| r.degraded == "rate-limited").count(),
+            1,
+            "{rows:?}"
+        );
         // three bad keys from the same IP → blocked even with a good key
         for _ in 0..3 {
             h.http

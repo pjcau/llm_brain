@@ -81,6 +81,25 @@ pub struct SessionRow {
     pub degraded: i64,
 }
 
+/// Today's proxy-side figures per profile (ring 2, live).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub struct TodayProfile {
+    pub profile: String,
+    pub requests: i64,
+    pub spent_usd: f64,
+    pub rejected: i64,
+    pub errors: i64,
+    pub degraded: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub struct AuditRow {
+    pub ts: String,
+    pub ip: String,
+    pub prefix: String,
+    pub outcome: String,
+}
+
 /// One proxied request for the live feed.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 pub struct RecentRow {
@@ -506,6 +525,41 @@ impl Db {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Ring 2 view of today (UTC): per profile, live spend and rejections from the proxy.
+    pub fn today_by_profile(&self) -> Result<Vec<TodayProfile>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT profile, COUNT(*), SUM(cost_usd), SUM(status = 429), SUM(status >= 400 AND status != 429), SUM(degraded IN ('fast-only','max-tokens'))
+             FROM requests WHERE ts >= date('now') GROUP BY profile",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(TodayProfile {
+                profile: r.get(0)?,
+                requests: r.get(1)?,
+                spent_usd: r.get(2)?,
+                rejected: r.get(3)?,
+                errors: r.get(4)?,
+                degraded: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Last `limit` authentication failures / revocations.
+    pub fn recent_audit(&self, limit: u32) -> Result<Vec<AuditRow>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT ts, ip, prefix, outcome FROM auth_audit ORDER BY id DESC LIMIT ?1")?;
+        let rows = stmt.query_map(params![limit], |r| {
+            Ok(AuditRow {
+                ts: r.get(0)?,
+                ip: r.get(1)?,
+                prefix: r.get(2)?,
+                outcome: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// Sessions (profile × user) active in the last `days`, most recent first.
     pub fn sessions(&self, days: u32, limit: u32) -> Result<Vec<SessionRow>> {
         let mut stmt = self.conn.prepare(
@@ -830,6 +884,12 @@ mod tests {
             ("cc:abc", 2, "m2")
         );
         assert!((sessions[0].cost_usd - 0.02).abs() < 1e-9);
+        let today = db.today_by_profile().unwrap();
+        let d = today.iter().find(|t| t.profile == "dev").unwrap();
+        assert_eq!((d.requests, d.rejected, d.errors), (4, 0, 0));
+        assert!((d.spent_usd - 0.77).abs() < 1e-9);
+        db.insert_audit("1.2.3.4", "brain_x_…", "unknown").unwrap();
+        assert_eq!(db.recent_audit(5).unwrap()[0].outcome, "unknown");
         let recent = db.recent_requests(3).unwrap();
         assert_eq!(recent.len(), 3);
         assert_eq!(recent[0].user, "cc:abc", "newest first");

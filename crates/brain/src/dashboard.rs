@@ -4,7 +4,9 @@
 //! is current without cron.
 
 use crate::config::Config;
-use crate::db::{BenchRun, DailyRequests, DailyUsage, Db, RecentRow, SessionRow};
+use crate::db::{
+    AuditRow, BenchRun, DailyRequests, DailyUsage, Db, RecentRow, SessionRow, TodayProfile,
+};
 use crate::events::{DailyStat, anomalies};
 use axum::{Router, extract::State, response::Html, routing::get};
 use serde::Serialize;
@@ -31,6 +33,12 @@ pub struct Summary {
     pub sessions: Vec<SessionRow>,
     /// The last proxied requests, newest first.
     pub recent: Vec<RecentRow>,
+    /// Today per profile from the proxy itself (ring 2): live spend, rejections, errors, degradations.
+    pub today: Vec<TodayProfile>,
+    /// Last authentication failures / revocations.
+    pub audit: Vec<AuditRow>,
+    /// Anomalies computed from the proxy's own rows (runaway outputs, very slow requests, rejections).
+    pub proxy_anomalies: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -82,6 +90,7 @@ pub fn usage_state(pct: f64) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn summary(
     cfg: &Config,
     usage: &[DailyUsage],
@@ -90,6 +99,8 @@ pub fn summary(
     proxied: Vec<DailyRequests>,
     sessions: Vec<SessionRow>,
     recent: Vec<RecentRow>,
+    today: Vec<TodayProfile>,
+    audit: Vec<AuditRow>,
 ) -> Summary {
     let usage = usage
         .iter()
@@ -149,10 +160,52 @@ pub fn summary(
         events,
         bench,
         anomalies: anomalies(stats),
+        proxy_anomalies: proxy_anomalies(&recent, &today),
         proxied,
         sessions,
         recent,
+        today,
+        audit,
     }
+}
+
+/// Rules on the proxy's own data. Simple on purpose, like the Phase 0 ones.
+pub fn proxy_anomalies(recent: &[RecentRow], today: &[TodayProfile]) -> Vec<String> {
+    let mut out = Vec::new();
+    for r in recent {
+        if r.output_tokens >= 20_000 {
+            out.push(format!(
+                "{} {} {}: {} output tokens in one request (runaway generation?)",
+                &r.ts[..16],
+                r.profile,
+                r.model,
+                r.output_tokens
+            ));
+        } else if r.latency_ms >= 600_000 {
+            out.push(format!(
+                "{} {} {}: request took {} min",
+                &r.ts[..16],
+                r.profile,
+                r.model,
+                r.latency_ms / 60_000
+            ));
+        }
+    }
+    for t in today {
+        if t.rejected > 0 {
+            out.push(format!(
+                "today {}: {} request(s) refused by the proxy (rate limit or budget)",
+                t.profile, t.rejected
+            ));
+        }
+        if t.errors > 0 {
+            out.push(format!(
+                "today {}: {} upstream error(s)",
+                t.profile, t.errors
+            ));
+        }
+    }
+    out
 }
 
 fn load(state: &AppState) -> anyhow::Result<Summary> {
@@ -165,6 +218,8 @@ fn load(state: &AppState) -> anyhow::Result<Summary> {
         db.daily_requests(state.days)?,
         db.sessions(state.days, 100)?,
         db.recent_requests(50)?,
+        db.today_by_profile()?,
+        db.recent_audit(20)?,
     ))
 }
 
@@ -196,10 +251,12 @@ pub fn router(state: AppState) -> Router {
 /// Responsive: cards and tables reflow below 720 px, wide tables scroll.
 const PAGE: &str = r##"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>llm_brain board</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light">
 <style>
 :root{--bg:#0b1120;--card:#0f172a;--line:#1e293b;--fg:#e2e8f0;--mut:#94a3b8;--ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;--acc:#22d3ee;--acc2:#6366f1}
-@media (prefers-color-scheme: light){:root{--bg:#f8fafc;--card:#ffffff;--line:#e2e8f0;--fg:#0f172a;--mut:#64748b}}
+@media (prefers-color-scheme: light){:root:not([data-theme=dark]){--bg:#f8fafc;--card:#ffffff;--line:#e2e8f0;--fg:#0f172a;--mut:#64748b}}
+:root[data-theme=light]{--bg:#f8fafc;--card:#ffffff;--line:#e2e8f0;--fg:#0f172a;--mut:#64748b}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:999px;overflow:hidden}.seg button{background:none;border:0;color:var(--mut);font:inherit;font-size:11px;padding:2px 8px;cursor:pointer}.seg button.on{background:var(--line);color:var(--fg)}
 *{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 header{position:sticky;top:0;z-index:2;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--card);display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
@@ -225,13 +282,15 @@ ul{margin:0;padding-left:18px}
 @media (max-width:720px){main{padding:10px 10px 40px;gap:10px}section{padding:8px 10px}table{font-size:12px;min-width:560px}th,td{padding:4px 5px}.cards{grid-template-columns:repeat(2,1fr);gap:8px}.card{padding:8px}.card .v{font-size:17px}header{padding:8px 10px}.hide-sm{display:none}}
 </style></head><body>
 <header><h1>llm_brain</h1><span id="ts">loading…</span><span>auto-refresh 30 s</span>
-<nav><a href="#budget">budget</a><a href="#sessions">sessions</a><a href="#proxy">proxy</a><a href="#recent">live</a><a href="#anom">anomalies</a><a href="#bench">bench</a></nav></header>
+<span class="seg" id="theme" title="theme"><button data-t="auto">auto</button><button data-t="light">light</button><button data-t="dark">dark</button></span>
+<nav><a href="#budget">budget</a><a href="#sessions">sessions</a><a href="#proxy">proxy</a><a href="#recent">live</a><a href="#anom">anomalies</a><a href="#audit">auth</a><a href="#bench">bench</a></nav></header>
 <main>
 <section id="budget"><h2>Budget · today per profile <small id="budget-sub"></small></h2><div class="cards" id="usage"></div></section>
 <section id="sessions"><h2>Sessions · profile × user <small>last 7 days, proxy only</small></h2><div class="tw"><table id="sessions-t"></table></div></section>
 <section id="proxy"><h2>Proxy · day × profile × model <small>exact, from the proxy</small></h2><div class="tw"><table id="proxied"></table></div></section>
 <section id="recent"><h2>Live · last requests</h2><div class="tw"><table id="recent-t"></table></div></section>
 <section id="anom"><h2>Anomalies</h2><ul id="anom-l"></ul></section>
+<section id="audit"><h2>Auth failures <small>last 20 · IPs get blocked after 20 in 10 min</small></h2><div class="tw"><table id="audit-t"></table></div></section>
 <section id="tools"><h2>Tool logs · day × tool × model <small>Phase 0, from aider / Claude Code files</small></h2><div class="tw"><table id="events"></table></div></section>
 <section id="bench"><h2>Benchmark runs</h2><div class="tw"><table id="bench-t"></table></div></section>
 </main>
@@ -247,19 +306,27 @@ async function load(){
   document.getElementById('ts').textContent='updated '+new Date(s.generated_at).toLocaleTimeString();
   const today=(s.usage[0]||{}).day; document.getElementById('budget-sub').textContent=today||'';
   const todayRows=s.usage.filter(u=>u.day===today);
-  document.getElementById('usage').innerHTML=todayRows.map(u=>`<div class="card"><div class="p">${esc(u.profile)}</div><div class="v">$${f(u.spent_usd)} <span class="l">/ $${f(u.limit_usd,2)}</span></div><div class="l ${stateCls(u.state)}">${u.pct.toFixed(0)}% · ${esc(u.state)}</div><div class="bar ${u.state}"><i style="width:${Math.min(100,u.pct)}%"></i></div></div>`).join('')||'<div class="empty">no snapshots yet</div>';
+  const todayMap=Object.fromEntries((s.today||[]).map(t=>[t.profile,t]));
+  document.getElementById('usage').innerHTML=todayRows.map(u=>{const t=todayMap[u.profile]||{};const live=t.spent_usd??0;const pct=u.limit_usd?Math.max(u.pct,live/u.limit_usd*100):u.pct;return `<div class="card"><div class="p">${esc(u.profile)}</div><div class="v">$${f(live,4)} <span class="l">/ $${f(u.limit_usd,2)}</span></div><div class="l">proxy live · OpenRouter $${f(u.spent_usd)}</div><div class="l ${stateCls(u.state)}">${pct.toFixed(0)}% · ${esc(u.state)}${t.rejected?` · <span class=fail>${t.rejected} refused</span>`:''}${t.errors?` · <span class=fail>${t.errors} err</span>`:''}${t.degraded?` · <span class=warn>${t.degraded} degraded</span>`:''}</div><div class="bar ${u.state}"><i style="width:${Math.min(100,pct)}%"></i></div></div>`}).join('')||'<div class="empty">no snapshots yet</div>';
   document.getElementById('sessions-t').innerHTML='<tr><th>last</th><th>profile</th><th>user / session</th><th class=n>req</th><th class=n>err</th><th class=n>degr</th><th class=n>prompt tok</th><th class=n>cache</th><th class=n>out tok</th><th class=n>cost $</th><th class=n>lat s</th><th class="hide-sm">models</th><th class="hide-sm">first</th></tr>'+
     (s.sessions.map(x=>`<tr><td title="${esc(x.last_ts)}">${ago(x.last_ts)}</td><td>${esc(x.profile)}</td><td><span class="pill">${esc(x.user)}</span></td><td class=n>${x.requests}</td><td class="n ${x.errors?'fail':''}">${x.errors}</td><td class="n ${x.degraded?'warn':''}">${x.degraded}</td><td class=n>${x.input_tokens}</td><td class=n>${x.input_tokens?Math.round(100*x.cache_read_tokens/(x.input_tokens+x.cache_read_tokens))+'%':'-'}</td><td class=n>${x.output_tokens}</td><td class=n>${f(x.cost_usd,4)}</td><td class=n>${x.avg_latency_ms==null?'-':(x.avg_latency_ms/1000).toFixed(1)}</td><td class="hide-sm tag">${esc(x.models)}</td><td class="hide-sm">${t(x.first_ts)}</td></tr>`).join('')||'<tr><td class=empty colspan=13>no sessions yet — route a client through the proxy</td></tr>');
   document.getElementById('proxied').innerHTML='<tr><th>day</th><th>profile</th><th>model</th><th class=n>req</th><th class=n>err</th><th class=n>degr</th><th class=n>stream</th><th class=n>prompt tok</th><th class=n>cache read</th><th class=n>out tok</th><th class=n>cost $</th><th class=n>lat s</th></tr>'+
     (s.proxied.map(p=>`<tr><td>${p.day}</td><td>${esc(p.profile)}</td><td>${esc(p.model)}</td><td class=n>${p.requests}</td><td class="n ${p.errors?'fail':''}">${p.errors}</td><td class="n ${p.degraded?'warn':''}">${p.degraded}</td><td class=n>${p.streamed}</td><td class=n>${p.input_tokens}</td><td class=n>${p.cache_read_tokens}</td><td class=n>${p.output_tokens}</td><td class=n>${f(p.cost_usd,4)}</td><td class=n>${p.avg_latency_ms==null?'-':(p.avg_latency_ms/1000).toFixed(1)}</td></tr>`).join('')||'<tr><td class=empty colspan=12>no proxied requests yet</td></tr>');
   document.getElementById('recent-t').innerHTML='<tr><th>when</th><th>profile</th><th>user</th><th class="hide-sm">dialect</th><th>model</th><th class=n>status</th><th class=n>in</th><th class=n>cache</th><th class=n>out</th><th class=n>cost $</th><th class=n>lat s</th><th>notes</th></tr>'+
-    (s.recent.map(x=>`<tr><td title="${esc(x.ts)}">${t(x.ts)}</td><td>${esc(x.profile)}</td><td class="tag">${esc(x.user)}</td><td class="hide-sm tag">${esc(x.dialect)}${x.stream?' · sse':''}</td><td>${esc(x.model)}</td><td class="n ${x.status>=400?'fail':'pass'}">${x.status}</td><td class=n>${x.input_tokens}</td><td class=n>${x.cache_read_tokens}</td><td class=n>${x.output_tokens}</td><td class=n>${f(x.cost_usd,5)}</td><td class=n>${(x.latency_ms/1000).toFixed(1)}</td><td class="tag">${esc(x.degraded)}</td></tr>`).join('')||'<tr><td class=empty colspan=12>nothing yet</td></tr>');
-  document.getElementById('anom-l').innerHTML=s.anomalies.length?s.anomalies.map(a=>`<li class=anom>${esc(a)}</li>`).join(''):'<li class=empty>none</li>';
+    (s.recent.map(x=>`<tr class="${x.output_tokens>=20000||x.latency_ms>=600000?'anom':''}"><td title="${esc(x.ts)}">${t(x.ts)}</td><td>${esc(x.profile)}</td><td class="tag">${esc(x.user)}</td><td class="hide-sm tag">${esc(x.dialect)}${x.stream?' · sse':''}</td><td>${esc(x.model)}</td><td class="n ${x.status>=400?'fail':'pass'}">${x.status}</td><td class=n>${x.input_tokens}</td><td class=n>${x.cache_read_tokens}</td><td class=n>${x.output_tokens}</td><td class=n>${f(x.cost_usd,5)}</td><td class=n>${(x.latency_ms/1000).toFixed(1)}</td><td class="tag">${esc(x.degraded)}</td></tr>`).join('')||'<tr><td class=empty colspan=12>nothing yet</td></tr>');
+  const anoms=[...(s.proxy_anomalies||[]).map(a=>'proxy · '+a),...s.anomalies.map(a=>'tool logs · '+a)];
+  document.getElementById('anom-l').innerHTML=anoms.length?anoms.map(a=>`<li class=anom>${esc(a)}</li>`).join(''):'<li class=empty>none</li>';
+  document.getElementById('audit-t').innerHTML='<tr><th>when</th><th>ip</th><th>key</th><th>outcome</th></tr>'+((s.audit||[]).map(a=>`<tr><td>${t(a.ts)}</td><td>${esc(a.ip)}</td><td class="tag">${esc(a.prefix)}</td><td class="${a.outcome==='revoked'?'warn':'fail'}">${esc(a.outcome)}</td></tr>`).join('')||'<tr><td class=empty colspan=4>no failed authentications</td></tr>');
   document.getElementById('events').innerHTML='<tr><th>day</th><th>tool</th><th>model</th><th class=n>req</th><th class=n>err</th><th class=n>bad edits</th><th class=n>retries</th><th class=n>prompt tok</th><th class=n>out tok</th><th class=n>cache</th><th class=n>est $</th><th class=n>lat s</th></tr>'+
     (s.events.map(e=>`<tr><td>${e.day}</td><td>${esc(e.tool)}</td><td>${esc(e.model)}</td><td class=n>${e.requests}</td><td class="n ${e.errors?'fail':''}">${e.errors}</td><td class=n>${e.edit_failed}</td><td class=n>${e.retries}</td><td class=n>${e.prompt_tokens}</td><td class=n>${e.output_tokens}</td><td class=n>${e.cache_hit==null?'-':(e.cache_hit*100).toFixed(0)+'%'}</td><td class=n>${f(e.est_cost_usd)}</td><td class=n>${f(e.avg_latency_s,1)}</td></tr>`).join('')||'<tr><td class=empty colspan=12>no events yet</td></tr>');
   document.getElementById('bench-t').innerHTML='<tr><th>when</th><th class="hide-sm">run</th><th>task</th><th>tool</th><th>tier</th><th>model</th><th>result</th><th class=n>s</th><th class=n>$</th><th class="hide-sm">notes</th></tr>'+
     (s.bench.map(b=>`<tr><td>${b.ts}</td><td class="hide-sm tag">${esc(b.run_id)}</td><td>${esc(b.task_id)}</td><td>${esc(b.tool)}</td><td>${esc(b.tier)}</td><td>${esc(b.model)}</td><td class="${b.passed?'pass':'fail'}">${b.passed?'PASS':'FAIL'}</td><td class=n>${b.seconds.toFixed(0)}</td><td class=n>${f(b.cost_usd)}</td><td class="hide-sm tag">${esc(b.notes)}</td></tr>`).join('')||'<tr><td class=empty colspan=10>no runs yet</td></tr>');
 }
+// theme: auto (system) / light / dark, remembered per browser
+const applyTheme=t=>{if(t==='auto')document.documentElement.removeAttribute('data-theme');else document.documentElement.setAttribute('data-theme',t);document.querySelectorAll('#theme button').forEach(b=>b.classList.toggle('on',b.dataset.t===t));};
+let theme='auto';try{theme=localStorage.getItem('brain-theme')||'auto'}catch(e){}
+applyTheme(theme);
+document.querySelectorAll('#theme button').forEach(b=>b.onclick=()=>{applyTheme(b.dataset.t);try{localStorage.setItem('brain-theme',b.dataset.t)}catch(e){}});
 load();setInterval(load,30000);
 </script></body></html>"##;
 
@@ -308,7 +375,17 @@ mod tests {
             exit_code: Some(0),
             notes: String::new(),
         }];
-        let s = summary(&cfg(), &usage, &stats, &bench, vec![], vec![], vec![]);
+        let s = summary(
+            &cfg(),
+            &usage,
+            &stats,
+            &bench,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
         assert_eq!(s.usage[0].state, "degrade-fast");
         assert!((s.usage[0].pct - 80.0).abs() < 1e-9);
         assert_eq!(s.events[0].requests, 10);
@@ -325,6 +402,41 @@ mod tests {
         assert_eq!(usage_state(10.0), "ok");
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"spent_usd\":2.4"));
+    }
+
+    #[test]
+    fn proxy_anomalies_flag_runaways_slow_requests_and_refusals() {
+        let mk = |out: i64, lat: i64| RecentRow {
+            ts: "2026-09-20T14:30:12+00:00".into(),
+            profile: "dev".into(),
+            model: "m".into(),
+            output_tokens: out,
+            latency_ms: lat,
+            ..Default::default()
+        };
+        let today = vec![TodayProfile {
+            profile: "car".into(),
+            requests: 3,
+            spent_usd: 0.0,
+            rejected: 2,
+            errors: 1,
+            degraded: 0,
+        }];
+        let a = proxy_anomalies(
+            &[mk(89_474, 2_137_046), mk(10, 500), mk(100, 700_000)],
+            &today,
+        );
+        assert!(a.iter().any(|x| x.contains("89474 output tokens")), "{a:?}");
+        assert!(a.iter().any(|x| x.contains("took 11 min")), "{a:?}");
+        assert!(
+            a.iter().any(|x| x.contains("car: 2 request(s) refused")),
+            "{a:?}"
+        );
+        assert!(
+            a.iter().any(|x| x.contains("car: 1 upstream error")),
+            "{a:?}"
+        );
+        assert_eq!(a.len(), 4);
     }
 
     #[tokio::test]
