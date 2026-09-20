@@ -176,8 +176,9 @@ async fn probe(opts: &RunOptions) -> Option<f64> {
         .map(|k| k.usage)
 }
 
-/// Returns (exit code or None on timeout, notes). Saves stdout/stderr next
-/// to `log_prefix` (`.out` / `.err`) so a failed run can be read afterwards.
+/// Returns (exit code or None on timeout, notes). stdout/stderr are written
+/// straight to `<log_prefix>.out` / `.err`, so a run killed on timeout still
+/// leaves its output behind.
 async fn run_tool(
     inv: &ToolInvocation,
     override_cmd: Option<&[String]>,
@@ -189,44 +190,59 @@ async fn run_tool(
         Some(cmd) if !cmd.is_empty() => (cmd[0].clone(), cmd[1..].to_vec()),
         _ => (inv.program.clone(), inv.args.clone()),
     };
+    let out_path = log_prefix.with_extension("out");
+    let err_path = log_prefix.with_extension("err");
+    let (Ok(out_file), Ok(err_file)) = (
+        std::fs::File::create(&out_path),
+        std::fs::File::create(&err_path),
+    ) else {
+        return (
+            Some(-1),
+            format!("cannot create logs under {};", log_prefix.display()),
+        );
+    };
     let mut cmd = Command::new(&program);
     cmd.args(&args)
         .current_dir(cwd)
         .envs(&inv.env)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(out_file))
+        .stderr(Stdio::from(err_file))
         .kill_on_drop(true);
-    let child = match cmd.spawn() {
+    let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return (Some(127), format!("cannot start {program}: {e};")),
     };
-    match tokio::time::timeout(Duration::from_secs(timeout_s), child.wait_with_output()).await {
-        Ok(Ok(out)) => {
-            let _ = std::fs::write(log_prefix.with_extension("out"), &out.stdout);
-            let _ = std::fs::write(log_prefix.with_extension("err"), &out.stderr);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let tail: String = stderr
-                .lines()
-                .rev()
-                .take(3)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join(" | ");
-            let notes = if out.status.success() {
-                format!("log {};", log_prefix.with_extension("out").display())
+    match tokio::time::timeout(Duration::from_secs(timeout_s), child.wait()).await {
+        Ok(Ok(status)) => {
+            let notes = if status.success() {
+                format!("log {};", out_path.display())
             } else {
-                format!(
-                    "tool stderr: {tail}; log {};",
-                    log_prefix.with_extension("err").display()
-                )
+                let stderr = std::fs::read_to_string(&err_path).unwrap_or_default();
+                let tail = stderr
+                    .lines()
+                    .rev()
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                format!("tool stderr: {tail}; log {};", err_path.display())
             };
-            (out.status.code(), notes)
+            (status.code(), notes)
         }
         Ok(Err(e)) => (Some(-1), format!("tool failed: {e};")),
-        Err(_) => (None, format!("tool timeout after {timeout_s}s;")),
+        Err(_) => {
+            let _ = child.kill().await;
+            (
+                None,
+                format!(
+                    "tool timeout after {timeout_s}s; log {};",
+                    out_path.display()
+                ),
+            )
+        }
     }
 }
 
