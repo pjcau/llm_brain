@@ -43,6 +43,16 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
+    /// The llm_brain proxy: OpenAI dialect under `/v1`, Anthropic dialect at the root.
+    pub fn brain(base_url: &str, client_key: impl Into<String>) -> Self {
+        let base = base_url.trim_end_matches('/');
+        Self {
+            openai_base: format!("{base}/v1"),
+            anthropic_base: base.to_string(),
+            api_key: client_key.into(),
+        }
+    }
+
     pub fn openrouter(api_key: impl Into<String>) -> Self {
         Self {
             openai_base: "https://openrouter.ai/api/v1".into(),
@@ -338,6 +348,23 @@ mod tests {
             "the key never lands in the file"
         );
         assert!(cfg["provider"]["brain"]["models"]["deepseek/deepseek-v4-flash"].is_object());
+    }
+
+    #[test]
+    fn brain_endpoint_has_both_dialect_bases() {
+        let e = Endpoint::brain("https://brain.example/", "brain_benchmark_x");
+        assert_eq!(e.openai_base, "https://brain.example/v1");
+        assert_eq!(e.anthropic_base, "https://brain.example");
+        let inv = invocation(
+            Tool::Claude,
+            &e,
+            "brain/agent",
+            "p",
+            "r",
+            &AiderOptions::default(),
+        );
+        assert_eq!(inv.env["ANTHROPIC_BASE_URL"], "https://brain.example");
+        assert_eq!(inv.env["ANTHROPIC_AUTH_TOKEN"], "brain_benchmark_x");
     }
 
     #[test]

@@ -213,6 +213,10 @@ enum BenchCmd {
         /// Where each task's tool output is saved
         #[arg(long, default_value = "bench/.runs")]
         logs: PathBuf,
+        /// Go through the llm_brain proxy at this URL instead of OpenRouter directly
+        /// (needs BRAIN_BENCH_KEY, a client key of the `benchmark` profile; `--model` may be brain/<tier>)
+        #[arg(long, value_name = "URL")]
+        via_proxy: Option<String>,
     },
     /// Rows of a run (or all runs)
     Report {
@@ -586,15 +590,27 @@ async fn main() -> Result<()> {
                     profile,
                     docker,
                     logs,
+                    via_proxy,
                 } => {
                     let p = cfg.profile(&profile)?;
-                    let key = env
-                        .get(&p.key_env())
-                        .filter(|k| !k.is_empty())
-                        .with_context(|| format!("{} not set", p.key_env()))?;
-                    let model = match model {
-                        Some(m) => m,
-                        None => cfg.model_for_tier(&tier)?.to_string(),
+                    // direct: the profile's OpenRouter key; via proxy: a client key of the benchmark profile
+                    let endpoint = match via_proxy.as_deref() {
+                        Some(url) => {
+                            let k = env.get("BRAIN_BENCH_KEY").filter(|k| !k.is_empty()).context("BRAIN_BENCH_KEY not set (brain keys create --profile benchmark --name bench on the server)")?;
+                            bench::tool::Endpoint::brain(url, k.clone())
+                        }
+                        None => {
+                            let key = env
+                                .get(&p.key_env())
+                                .filter(|k| !k.is_empty())
+                                .with_context(|| format!("{} not set", p.key_env()))?;
+                            bench::tool::Endpoint::openrouter(key.clone())
+                        }
+                    };
+                    let model = match (model, via_proxy.is_some()) {
+                        (Some(m), _) => m,
+                        (None, true) => format!("brain/{tier}"),
+                        (None, false) => cfg.model_for_tier(&tier)?.to_string(),
                     };
                     let (tasks, cache, logs) = (
                         config::anchored(tasks),
@@ -615,10 +631,14 @@ async fn main() -> Result<()> {
                         tool,
                         tier: tier.clone(),
                         model: model.clone(),
-                        endpoint: bench::tool::Endpoint::openrouter(key.clone()),
+                        endpoint,
                         cache_dir: cache,
                         run_id: run_id.clone(),
-                        cost_probe: Some(client.clone()),
+                        cost_probe: if via_proxy.is_some() {
+                            None
+                        } else {
+                            Some(client.clone())
+                        },
                         program_override: None,
                         docker_image: docker,
                         log_dir: logs,
