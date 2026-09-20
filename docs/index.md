@@ -86,8 +86,9 @@ the full reasoning. Updated at every iteration: see the
   signal. → [API layer](./architecture/api-layer.md#escalation)
 - **In Phase 1 the layer is a reverse proxy, not a translator**: OpenRouter
   already speaks Anthropic and OpenAI. → [Stack](./analysis/stack.md)
-- **`prism-ml/ternary-bonsai-2-27b` is the first `fast` candidate**; that
-  it also runs locally is a bonus, not a plan. → [Bonsai 2 27B](./models/bonsai-2-27b.md)
+- **Tiers decided from data**: `fast` = deepseek-v4-flash (solved the first
+  real bug with aider for 0.004 $), `reasoning` = bonsai-2-27b (must work,
+  in the architect role). → [Bonsai 2 27B](./models/bonsai-2-27b.md) · [Phase 0](./phase-0.md#first-benchmark-rows-2026-09-20-task-ago-0001)
 
 ## How it's built
 

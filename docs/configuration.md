@@ -54,18 +54,18 @@ profiles:
 
 ```yaml
 tiers:
-  fast:
+  fast:                                   # daily driver, editor role in aider
+    model: deepseek/deepseek-v4-flash
+    fallback: qwen/qwen3.7-flash
+    context: 1048576
+    input_usd_per_m: 0.04
+    output_usd_per_m: 0.08
+  reasoning:                              # architect role in aider, /model in Claude Code
     model: prism-ml/ternary-bonsai-2-27b
-    fallback: deepseek/deepseek-v4-flash
+    fallback: deepseek/deepseek-v4-pro
     context: 262144
     input_usd_per_m: 0.075
     output_usd_per_m: 0.5
-  reasoning:
-    model: deepseek/deepseek-v4-pro
-    fallback: qwen/qwen3.7-plus
-    context: 1048576
-    input_usd_per_m: 0.42
-    output_usd_per_m: 0.84
   premium:
     model: null
 ```
@@ -111,7 +111,7 @@ or-aider() {
     -v "$PWD:$PWD" -w "$PWD" -v "$HOME/.local/share/llm_brain:$HOME/.local/share/llm_brain" \
     -e OPENAI_API_BASE=https://openrouter.ai/api/v1 -e OPENAI_API_KEY="$OPENROUTER_KEY_DEV" \
     llm-brain-aider-test:latest aider --architect \
-      --model openai/deepseek/deepseek-v4-pro --editor-model openai/prism-ml/ternary-bonsai-2-27b \
+      --model openai/prism-ml/ternary-bonsai-2-27b --editor-model openai/deepseek/deepseek-v4-flash \
       --no-check-update --no-analytics \
       --model-metadata-file "$HOME/.local/share/llm_brain/aider-model-metadata.json" \
       --chat-history-file "$HOME/.local/share/llm_brain/aider-chat.md" \
@@ -121,7 +121,7 @@ or-aider() {
 # aider installed on the host (same logs)
 or-aider-host() {
   OPENAI_API_BASE=https://openrouter.ai/api/v1 OPENAI_API_KEY="$OPENROUTER_KEY_DEV" \
-  aider --architect --model openai/deepseek/deepseek-v4-pro --editor-model openai/prism-ml/ternary-bonsai-2-27b \
+  aider --architect --model openai/prism-ml/ternary-bonsai-2-27b --editor-model openai/deepseek/deepseek-v4-flash \
     --model-metadata-file "$HOME/.local/share/llm_brain/aider-model-metadata.json" \
     --chat-history-file "$HOME/.local/share/llm_brain/aider-chat.md" \
     --llm-history-file "$HOME/.local/share/llm_brain/aider-llm.history" "$@"
@@ -131,8 +131,8 @@ or-aider-host() {
 or-claude() {
   ANTHROPIC_BASE_URL=https://openrouter.ai/api \
   ANTHROPIC_AUTH_TOKEN="$OPENROUTER_KEY_DEV" \
-  ANTHROPIC_MODEL=prism-ml/ternary-bonsai-2-27b \
-  ANTHROPIC_DEFAULT_HAIKU_MODEL=prism-ml/ternary-bonsai-2-27b \
+  ANTHROPIC_MODEL=deepseek/deepseek-v4-flash \
+  ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek/deepseek-v4-flash \
   CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 \
   CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 \
   claude "$@"
@@ -157,14 +157,14 @@ costs for the tier models:
 
 ```json
 {
+  "openai/deepseek/deepseek-v4-flash": {
+    "max_input_tokens": 1048576, "max_output_tokens": 32768,
+    "input_cost_per_token": 4e-8, "output_cost_per_token": 8e-8,
+    "litellm_provider": "openai", "mode": "chat"
+  },
   "openai/prism-ml/ternary-bonsai-2-27b": {
     "max_input_tokens": 262144, "max_output_tokens": 32768,
     "input_cost_per_token": 7.5e-8, "output_cost_per_token": 5e-7,
-    "litellm_provider": "openai", "mode": "chat"
-  },
-  "openai/deepseek/deepseek-v4-pro": {
-    "max_input_tokens": 1048576, "max_output_tokens": 32768,
-    "input_cost_per_token": 4.2e-7, "output_cost_per_token": 8.4e-7,
     "litellm_provider": "openai", "mode": "chat"
   }
 }

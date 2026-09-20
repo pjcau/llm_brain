@@ -16,8 +16,8 @@ define tiers:
 
 | Tier        | Role                                          | Model |
 |-------------|-----------------------------------------------|-------|
-| `fast`      | 90% of queries: edits, reading, explanations  | config — candidate [bonsai-2-27b](../models/bonsai-2-27b.md) |
-| `reasoning` | hard bugs, complex logic design               | config |
+| `fast`      | 90% of queries: edits, reading, explanations  | `deepseek/deepseek-v4-flash` (decided 2026-09-20) |
+| `reasoning` | hard bugs, complex logic design               | [`prism-ml/ternary-bonsai-2-27b`](../models/bonsai-2-27b.md), fallback deepseek-v4-pro |
 | `premium`   | optional, rare cases                          | config |
 
 Prices and availability are checked on the price lists at decision time,

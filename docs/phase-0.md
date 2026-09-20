@@ -22,10 +22,11 @@ runs the suite.
 | Real `aider` in a container, launched with the exact env/args, hitting a mock OpenRouter | `crates/brain/tests/aider_container.rs`, `docker/aider-test.Dockerfile` | testcontainers (feature `docker-tests`), run in CI |
 | Config | `config/profiles.yaml`, `config/tiers.yaml` | validated by a test |
 
-Tiers as configured (prices from OpenRouter, 2026-09-19):
-`fast` = `prism-ml/ternary-bonsai-2-27b` ($0.075 / $0.5 per M), fallback
-`deepseek/deepseek-v4-flash` ($0.04 / $0.08); `reasoning` =
-`deepseek/deepseek-v4-pro` ($0.42 / $0.84), fallback `qwen/qwen3.7-plus`.
+Tiers as configured (decided 2026-09-20 from the first benchmark rows):
+`fast` = `deepseek/deepseek-v4-flash` ($0.04 / $0.08 per M), fallback
+`qwen/qwen3.7-flash`; `reasoning` = `prism-ml/ternary-bonsai-2-27b`
+($0.075 / $0.5), fallback `deepseek/deepseek-v4-pro`. In aider that is
+architect = bonsai, editor = deepseek-v4-flash.
 
 ## Steps
 
@@ -40,7 +41,7 @@ Tiers as configured (prices from OpenRouter, 2026-09-19):
    blocks into your shell profile / `~/.claude/settings.json`; save the
    metadata JSON as `.aider.model.metadata.json` in the repos you work on.
 5. Work normally for a week with both tools. Switch tier by hand
-   (`/model deepseek/deepseek-v4-pro` in Claude Code, `--architect` in aider).
+   (`/model prism-ml/ternary-bonsai-2-27b` in Claude Code, `--architect` in aider).
 6. Snapshot usage a few times a day (cron every hour is fine):
    `cargo run -p brain -- usage snapshot`; read `usage report`.
 7. Run the suite once with each tool: `brain bench run --tool aider` and
@@ -129,9 +130,12 @@ aider. Claude Code on a non-Claude model fails for a different reason:
 the model answers nothing after a tool result — the tool-loop reliability
 risk from [Claude Code and aider](./architecture/claude-code-aider.md).
 
-**Proposed decision (yours)**: move the `fast` tier to
-`deepseek/deepseek-v4-flash`, keep bonsai as a candidate for the nightly
-benchmark rather than the daily driver. One line in `config/tiers.yaml`.
+**Decided (2026-09-20)**: `fast` = `deepseek/deepseek-v4-flash`;
+**bonsai moves to the `reasoning` tier** — it must work, but as the
+architect/reasoning role, not as the daily driver. In aider's
+architect/editor split bonsai proposes and deepseek-v4-flash applies the
+edits, so its latency matters less and it never has to produce edits itself.
+The aider+bonsai failure is being re-run with logs to find its cause.
 
 ## Exit criteria (from the roadmap)
 

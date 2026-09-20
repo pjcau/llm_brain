@@ -9,7 +9,8 @@ title: Decisions
 | Date | Decision | Consequence |
 |------|----------|-------------|
 | 2026-09-19 | Start with OpenRouter; moving to a local GPU must stay a config change. | rule: no code outside `providers/` knows the provider |
-| 2026-09-19 | `prism-ml/ternary-bonsai-2-27b` is the `fast` candidate to evaluate in Phase 0. | [Bonsai](./models/bonsai-2-27b.md) |
+| 2026-09-19 | `prism-ml/ternary-bonsai-2-27b` is the `fast` candidate to evaluate in Phase 0. | superseded on 2026-09-20 (below) |
+| 2026-09-20 | **`fast` = `deepseek/deepseek-v4-flash`, `reasoning` = bonsai-2-27b** (fallback deepseek-v4-pro), from the first benchmark rows and direct probes. Bonsai must work, in the architect/reasoning role. | [Phase 0](./phase-0.md#first-benchmark-rows-2026-09-20-task-ago-0001) · [Bonsai](./models/bonsai-2-27b.md) |
 | 2026-09-19 | Documentation as a Docusaurus site, overview < 2000 words, updated at every iteration. | |
 | 2026-09-19 | **Budget is the primary requirement**: OpenRouter key per profile with a daily limit + degradation in the layer + benchmark with a separate key. | [Budget](./architecture/budget.md) |
 | 2026-09-19 | Phase 0 on OpenRouter directly, without LiteLLM. | [Stack](./analysis/stack.md) |

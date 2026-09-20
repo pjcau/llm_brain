@@ -1,19 +1,21 @@
-# Tiers, not models. Models are OpenRouter ids; prices checked on 2026-09-19.
-# fast:      bonsai $0.075/M in · $0.5/M out  — fallback deepseek-v4-flash $0.04 / $0.08
-# reasoning: deepseek-v4-pro $0.42 / $0.84    — fallback qwen3.7-plus $0.32 / $1.28
+# Tiers, not models. Models are OpenRouter ids; prices checked on 2026-09-19/20.
+# Decided 2026-09-20 from the first benchmark rows:
+#   fast:      deepseek-v4-flash $0.04/M in · $0.08/M out — solved ago-0001 with aider (260 s, $0.004)
+#   reasoning: bonsai-2-27b     $0.075 / $0.5             — reasoning model, single slow provider, no prompt cache:
+#              fine as the architect/reasoning role, not as the daily driver; fallback deepseek-v4-pro $0.42 / $0.84
 tiers:
   fast:
+    model: deepseek/deepseek-v4-flash
+    fallback: qwen/qwen3.7-flash
+    context: 1048576
+    input_usd_per_m: 0.04
+    output_usd_per_m: 0.08
+  reasoning:
     model: prism-ml/ternary-bonsai-2-27b
-    fallback: deepseek/deepseek-v4-flash
+    fallback: deepseek/deepseek-v4-pro
     context: 262144
     input_usd_per_m: 0.075
     output_usd_per_m: 0.5
-  reasoning:
-    model: deepseek/deepseek-v4-pro
-    fallback: qwen/qwen3.7-plus
-    context: 1048576
-    input_usd_per_m: 0.42
-    output_usd_per_m: 0.84
   premium:
     model: null
     fallback: null

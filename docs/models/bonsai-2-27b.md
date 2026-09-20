@@ -39,9 +39,12 @@ for `fast`; with a high `reasoning_effort`, potentially also a cheap
 | aider, `ago-0001` | failed after 831 s |
 | Default output | starts with a `thinking` block: budget `max_tokens` accordingly |
 
-Verdict so far: fine as a chat model, a poor fit as the `fast` tier for
-agentic tools — single slow provider, no cache. Comparison run against
-`deepseek/deepseek-v4-flash` in progress; see the [changelog](../changelog.md).
+Verdict (decided 2026-09-20): **bonsai is the `reasoning` tier**, not the
+`fast` one. Its strengths (reasoning, 262K context, open weights) fit the
+architect role; its weaknesses (one slow provider, no prompt cache) are
+tolerable there because the reasoning tier is called rarely and never has
+to apply edits. `fast` is `deepseek/deepseek-v4-flash`, which solved
+`ago-0001` with aider. Fallback for reasoning: `deepseek/deepseek-v4-pro`.
 
 ## To verify in Phase 0, in order
 

@@ -29,28 +29,29 @@ another ~50 MB.
 
 Even at **10×** (30 000 req/day) the machines below stay the same.
 
-## Monthly cost per option
+## Monthly cost per option (Rust footprint)
 
-| Option | Compute | Mandatory extras | Backup | **Total/month** |
-|--------|---------|------------------|--------|-----------------|
-| **Hetzner CAX11** (2 vCPU ARM, 4 GB, 40 GB) | ~€3.8 | IPv4 ~€0.5 | Object Storage/B2 ≈ 0 | **~€4–5** |
-| **AWS Lightsail 1 GB** (2 vCPU, 40 GB, 2 TB) | $7 (IPv4 included) | — | S3 ≈ $0.1 | **~$7** |
-| **AWS Lightsail 2 GB** (2 vCPU, 60 GB, 3 TB) | $12 | — | S3 ≈ $0.1 | **~$12** |
-| **AWS EC2 t4g.micro** (2 vCPU ARM, 1 GB) | $7.0 | EBS gp3 20 GB ~$2 + public IPv4 ~$3.7 | S3 | **~$13** |
-| **AWS EC2 t4g.small** (2 vCPU ARM, 2 GB) | $14.0 | same | S3 | **~$20** |
-| AWS ECS Fargate 0.25 vCPU/0.5 GB | ~$9 | **ALB ~$16+** | — | **~$25+**, and SQLite doesn't fit |
-| AWS Lambda | — | — | — | **no**: long streams, SQLite, cold starts |
+llm_brain is one static Rust binary (~6 MB, ~20–40 MB RSS) + SQLite +
+Litestream, fronted by Caddy: the smallest tier of every provider fits.
+
+| Option | Compute | Mandatory extras | Backup | **Total/month** | Fit |
+|--------|---------|------------------|--------|-----------------|-----|
+| **Hetzner CAX11** (2 vCPU ARM, 4 GB, 40 GB NVMe, 20 TB) — **chosen** | ~€3.8 | IPv4 ~€0.5 | Object Storage / B2 ≈ 0 | **~€4–5** | 100× headroom, in-place rescale (CAX21 8 GB ≈ €7) |
+| **AWS Lightsail $5** (2 vCPU burstable, 0.5 GB, 20 GB, 1 TB, IPv4 included) | $5 | — | S3 ≈ $0.1 | **~$5** | fits (binary + Caddy + Litestream ≈ 100 MB); burstable CPU throttles sustained load |
+| AWS EC2 t4g.nano (2 vCPU ARM, 0.5 GB) | $3.5 | EBS gp3 8–20 GB ~$1–2 + public IPv4 ~$3.7 | S3 | **~$8–9** | the paid IPv4 makes it pricier than Lightsail |
+| AWS EC2 t4g.small (2 GB) | $14.0 | EBS ~$2 + IPv4 ~$3.7 | S3 | **~$20** | more RAM than the service will ever use |
+| AWS Lambda + Function URL (Rust, response streaming) | ≈ $2–3 at 3 000 req/day × ~10 s × 128 MB | DynamoDB pennies | — | **≈ $2–3** | cheapest, but no local SQLite: budget/keys/usage move to DynamoDB, Litestream and single-instance simplicity go away |
+| AWS ECS Fargate 0.25 vCPU/0.5 GB | ~$9 | **ALB ~$16+** | — | **~$25+** | no: ALB cost, and SQLite doesn't fit |
 
 Notes:
 - On EC2 the **public IPv4 is charged** ($0.005/h ≈ $3.7/month); on
-  Lightsail it is included. With Tailscale/VPC it can be avoided entirely.
-- Lightsail is "AWS's VPS": fixed price, IPv4 included, in the same region
-  as the other AWS resources (VPC peering available). It is the simplest
-  AWS option for this workload.
+  Lightsail it is included; on Hetzner it is ~€0.5.
 - SSM Parameter Store (standard) is free; Secrets Manager costs
-  $0.40/secret/month: use SSM.
+  $0.40/secret/month: use SSM if on AWS.
+- Prices verified 2026-09-19 (Lightsail list, EC2 pricing API Frankfurt);
+  Hetzner indicative, confirm on the site.
 - **The dominant cost is not hosting**: it's tokens (≈ 40 €/month).
-  Hosting is 10–30% of the total, whatever the option.
+  Hosting is 10% of the total on the chosen option.
 
 ## Performance: what really changes and what doesn't
 
