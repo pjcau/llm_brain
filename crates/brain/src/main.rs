@@ -164,17 +164,23 @@ enum BenchCmd {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _ = dotenvy::dotenv();
+    // .env from the cwd, else from BRAIN_HOME (the shell usually sources it anyway)
+    if dotenvy::dotenv().is_err()
+        && let Ok(home) = std::env::var("BRAIN_HOME")
+    {
+        let _ = dotenvy::from_path(std::path::Path::new(&home).join(".env"));
+    }
     let cli = Cli::parse();
     let env: HashMap<String, String> = std::env::vars().collect();
     let cfg_dir = config::find_config_dir(cli.config.as_deref())?;
     let cfg = config::Config::load(&cfg_dir)?;
     let client = openrouter::Client::new(&cli.openrouter_base);
-    let db_path = cli
-        .db
-        .clone()
-        .or_else(|| env.get("BRAIN_DB").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("brain.db"));
+    let db_path = config::anchored(
+        cli.db
+            .clone()
+            .or_else(|| env.get("BRAIN_DB").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("brain.db")),
+    );
 
     match cli.cmd {
         Cmd::Keys { cmd } => {
@@ -353,6 +359,11 @@ async fn main() -> Result<()> {
                         Some(m) => m,
                         None => cfg.model_for_tier(&tier)?.to_string(),
                     };
+                    let (tasks, cache, logs) = (
+                        config::anchored(tasks),
+                        config::anchored(cache),
+                        config::anchored(logs),
+                    );
                     let list = bench::load_tasks(&tasks, only.as_deref())?;
                     if list.is_empty() {
                         bail!("no tasks in {}", tasks.display());

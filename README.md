@@ -8,6 +8,7 @@ Live: https://pjcau.github.io/llm_brain/
 ```bash
 npm install
 npm start              # http://localhost:3010/llm_brain/  (port 3010: 3000 is used by esp32-emu-turbo)
+cargo install --path crates/brain --root ~/.local   # the `brain` CLI on PATH; set BRAIN_HOME in .env
 npm run build          # static build in build/
 npm run sync-diagrams  # after editing diagrams/*.mmd
 ```

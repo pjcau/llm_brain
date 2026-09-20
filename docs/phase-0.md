@@ -30,6 +30,9 @@ architect = bonsai, editor = deepseek-v4-flash.
 
 ## Steps
 
+0. Install the CLI on your PATH and point it at the repo:
+   `cargo install --path crates/brain --root ~/.local` and `BRAIN_HOME=<repo>`
+   in `.env` ([details](./configuration.md#install-brain-and-use-it-from-any-folder)).
 1. **OpenRouter account**: load a fixed amount of credits (≈ 40 €: the hard
    monthly wall) and create a **management key**.
 2. `cp .env.example .env && chmod 600 .env`, put the management key in it.

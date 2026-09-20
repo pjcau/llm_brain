@@ -122,22 +122,52 @@ fn read_yaml<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     serde_yaml::from_str(&text).with_context(|| format!("invalid YAML in {}", path.display()))
 }
 
-/// Finds the `config/` directory: `--config`, then upwards from the cwd.
+/// The repo/home directory of llm_brain: `BRAIN_HOME` if set, otherwise the
+/// nearest ancestor of `cwd` that contains `config/profiles.yaml`. Relative
+/// defaults (db, bench dirs) resolve against it, so `brain` works from any
+/// folder once `BRAIN_HOME` is in the environment.
+pub fn resolve_home(brain_home: Option<&str>, cwd: &Path) -> Result<PathBuf> {
+    if let Some(h) = brain_home.filter(|h| !h.is_empty()) {
+        let home = PathBuf::from(h);
+        if home.join("config").join("profiles.yaml").is_file() {
+            return Ok(home);
+        }
+        bail!("BRAIN_HOME={h} has no config/profiles.yaml");
+    }
+    let mut dir = cwd.to_path_buf();
+    loop {
+        if dir.join("config").join("profiles.yaml").is_file() {
+            return Ok(dir);
+        }
+        if !dir.pop() {
+            bail!(
+                "no config/profiles.yaml found upwards from the current directory; set BRAIN_HOME or pass --config"
+            );
+        }
+    }
+}
+
+/// Finds the `config/` directory: `--config`, else `<home>/config`.
 pub fn find_config_dir(explicit: Option<&Path>) -> Result<PathBuf> {
     if let Some(p) = explicit {
         return Ok(p.to_path_buf());
     }
-    let mut dir = std::env::current_dir()?;
-    loop {
-        let candidate = dir.join("config");
-        if candidate.join("profiles.yaml").is_file() {
-            return Ok(candidate);
-        }
-        if !dir.pop() {
-            bail!(
-                "no config/profiles.yaml found upwards from the current directory; pass --config"
-            );
-        }
+    Ok(home_dir()?.join("config"))
+}
+
+pub fn home_dir() -> Result<PathBuf> {
+    let brain_home = std::env::var("BRAIN_HOME").ok();
+    resolve_home(brain_home.as_deref(), &std::env::current_dir()?)
+}
+
+/// A path from a CLI default: relative ones are anchored at the brain home.
+pub fn anchored(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+    match home_dir() {
+        Ok(h) => h.join(path),
+        Err(_) => path,
     }
 }
 
@@ -192,6 +222,30 @@ tiers:
         assert!(Config::from_yaml(&bad_tier, TIERS).is_err());
         let dup = PROFILES.replace("name: car", "name: dev");
         assert!(Config::from_yaml(&dup, TIERS).is_err());
+    }
+
+    #[test]
+    fn home_resolution_prefers_brain_home_then_walks_up() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("repo");
+        std::fs::create_dir_all(home.join("config")).unwrap();
+        std::fs::write(home.join("config/profiles.yaml"), "profiles: []\n").unwrap();
+        let deep = home.join("a/b");
+        std::fs::create_dir_all(&deep).unwrap();
+        assert_eq!(resolve_home(None, &deep).unwrap(), home);
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        assert!(resolve_home(None, &elsewhere).is_err());
+        assert_eq!(
+            resolve_home(Some(home.to_str().unwrap()), &elsewhere).unwrap(),
+            home
+        );
+        assert!(resolve_home(Some(elsewhere.to_str().unwrap()), &elsewhere).is_err());
+        assert_eq!(
+            resolve_home(Some(""), &deep).unwrap(),
+            home,
+            "empty BRAIN_HOME is ignored"
+        );
     }
 
     #[test]

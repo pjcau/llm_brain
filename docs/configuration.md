@@ -5,7 +5,36 @@ sidebar_position: 4
 
 # Configuration reference
 
-Everything needed to run Phase 0 on another machine. **No secrets here**:
+Everything needed to run Phase 0 on another machine.
+
+## Install `brain` and use it from any folder
+
+```bash
+cd ~/Documents/myProjects/llm_brain
+cargo install --path crates/brain --root ~/.local      # → ~/.local/bin/brain (already on PATH)
+```
+
+`brain` needs to find `config/` and its SQLite file. From inside the repo
+it walks up to find them; from anywhere else it uses **`BRAIN_HOME`**:
+
+```bash
+# in .env (sourced by ~/.bashrc), or exported in the shell
+BRAIN_HOME=/home/<you>/Documents/myProjects/llm_brain
+```
+
+With `BRAIN_HOME` set, `brain.db`, `bench/tasks`, `bench/.cache` and
+`bench/.runs` resolve inside the repo whatever the current directory, and
+`.env` is loaded from there if the cwd has none. `--config DIR` and
+`--db FILE` still override.
+
+Typical failure and its cause:
+
+| Symptom | Cause |
+|---------|-------|
+| `Command 'brain' not found` | not installed on PATH: run the `cargo install` line above (or call `target/release/brain`) |
+| `no config/profiles.yaml found upwards … set BRAIN_HOME` | called from another folder without `BRAIN_HOME` |
+| `OPENROUTER_KEY_DEV not set` / auth error | `.env` not sourced in this shell: `set -a; . $BRAIN_HOME/.env; set +a` in `~/.bashrc`, then open a new terminal |
+| functions `or-aider` / `or-claude` missing | they live in `~/.bashrc`, which only interactive shells read; open a new terminal or `source ~/.bashrc` | **No secrets here**:
 keys are always referenced by environment variable name; the values live
 only in an uncommitted `.env` (mode 0600) or in your shell.
 
@@ -81,8 +110,10 @@ OPENROUTER_KEY_AGO=
 OPENROUTER_KEY_BENCHMARK=
 OPENROUTER_KEY_ASSISTANT=
 OPENROUTER_KEY_CAR=
-# local SQLite (usage snapshots, events, benchmark runs)
+# local SQLite (usage snapshots, events, benchmark runs), relative to BRAIN_HOME
 BRAIN_DB=brain.db
+# repo dir, so `brain` works from any folder
+BRAIN_HOME=/home/<you>/Documents/myProjects/llm_brain
 # where the tools' logs go (default ~/.local/share/llm_brain)
 # BRAIN_DATA=
 ```
@@ -200,4 +231,4 @@ and by the container test in CI.
 | `brain bench run --tool aider\|claude [--tier fast] [--docker IMAGE] [--only id]` | `OPENROUTER_KEY_BENCHMARK` |
 | `brain bench report [--run ID]` | — |
 
-Global flags: `--config DIR`, `--db FILE`.
+Global flags: `--config DIR`, `--db FILE`. Env: `BRAIN_HOME`, `BRAIN_DB`, `BRAIN_DATA`.
