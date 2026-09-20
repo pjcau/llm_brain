@@ -62,6 +62,43 @@ pub struct RequestRow {
     pub degraded: String,
 }
 
+/// One end-user session as seen by the proxy: the `user` field (an app's
+/// opaque id, or Claude Code's `cc:<session>`), grouped per profile.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub struct SessionRow {
+    pub profile: String,
+    pub user: String,
+    pub first_ts: String,
+    pub last_ts: String,
+    pub requests: i64,
+    pub errors: i64,
+    pub input_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: f64,
+    pub avg_latency_ms: Option<f64>,
+    pub models: String,
+    pub degraded: i64,
+}
+
+/// One proxied request for the live feed.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub struct RecentRow {
+    pub ts: String,
+    pub profile: String,
+    pub user: String,
+    pub dialect: String,
+    pub model: String,
+    pub status: i64,
+    pub input_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: f64,
+    pub latency_ms: i64,
+    pub stream: bool,
+    pub degraded: String,
+}
+
 /// Aggregated proxied traffic for the board.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 pub struct DailyRequests {
@@ -469,6 +506,62 @@ impl Db {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Sessions (profile × user) active in the last `days`, most recent first.
+    pub fn sessions(&self, days: u32, limit: u32) -> Result<Vec<SessionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT profile, user, MIN(ts), MAX(ts), COUNT(*), SUM(status >= 400),
+                    SUM(input_tokens + cache_write_tokens), SUM(cache_read_tokens), SUM(output_tokens),
+                    SUM(cost_usd), AVG(latency_ms), GROUP_CONCAT(DISTINCT model), SUM(degraded != '')
+             FROM requests WHERE ts >= datetime('now', ?1) AND user != ''
+             GROUP BY profile, user ORDER BY MAX(ts) DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![format!("-{days} days"), limit], |r| {
+            Ok(SessionRow {
+                profile: r.get(0)?,
+                user: r.get(1)?,
+                first_ts: r.get(2)?,
+                last_ts: r.get(3)?,
+                requests: r.get(4)?,
+                errors: r.get(5)?,
+                input_tokens: r.get(6)?,
+                cache_read_tokens: r.get(7)?,
+                output_tokens: r.get(8)?,
+                cost_usd: r.get(9)?,
+                avg_latency_ms: r.get(10)?,
+                models: r.get::<_, Option<String>>(11)?.unwrap_or_default(),
+                degraded: r.get(12)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// The last `limit` proxied requests, newest first.
+    pub fn recent_requests(&self, limit: u32) -> Result<Vec<RecentRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT ts, profile, user, dialect, model, status, input_tokens + cache_write_tokens, cache_read_tokens, output_tokens,
+                    cost_usd, latency_ms, stream, degraded
+             FROM requests ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |r| {
+            Ok(RecentRow {
+                ts: r.get(0)?,
+                profile: r.get(1)?,
+                user: r.get(2)?,
+                dialect: r.get(3)?,
+                model: r.get(4)?,
+                status: r.get(5)?,
+                input_tokens: r.get(6)?,
+                cache_read_tokens: r.get(7)?,
+                output_tokens: r.get(8)?,
+                cost_usd: r.get(9)?,
+                latency_ms: r.get(10)?,
+                stream: r.get::<_, i32>(11)? != 0,
+                degraded: r.get(12)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// USD spent by `profile` since `since` (UTC, RFC 3339 prefix compare works on the stored format).
     pub fn spent_since(&self, profile: &str, since: DateTime<Utc>) -> Result<f64> {
         Ok(self.conn.query_row(
@@ -720,6 +813,26 @@ mod tests {
         );
         assert!((dev.cost_usd - 0.75).abs() < 1e-9);
         assert_eq!(dev.avg_latency_ms, Some(100.0));
+        // sessions group by (profile, user) and skip anonymous requests
+        let mut s1 = row("dev", 0.01);
+        s1.user = "cc:abc".into();
+        s1.model = "m2".into();
+        db.insert_request(&s1).unwrap();
+        db.insert_request(&s1).unwrap();
+        let sessions = db.sessions(1, 10).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(
+            (
+                sessions[0].user.as_str(),
+                sessions[0].requests,
+                sessions[0].models.as_str()
+            ),
+            ("cc:abc", 2, "m2")
+        );
+        assert!((sessions[0].cost_usd - 0.02).abs() < 1e-9);
+        let recent = db.recent_requests(3).unwrap();
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].user, "cc:abc", "newest first");
     }
 
     #[test]
