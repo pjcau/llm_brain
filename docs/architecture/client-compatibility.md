@@ -72,6 +72,7 @@ fields a non-Claude model rejects with `400`:
 | `context_management` + beta header | `400 Extra inputs are not permitted` | `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` |
 | beta tool fields (`strict`, `defer_loading`) | `400` on the tool schema | same |
 | `output_config` (effort, structured output) | `400` | same, or strip in llm_brain |
+| mid-conversation `role: "system"` entries (Claude Code's reminders) | **no error**: the model ends the turn with no content → Claude Code says "no visible output" and loops (measured: 29% of requests on deepseek-v4-pro) | llm_brain converts them to user turns and merges consecutive user turns |
 
 So for the `dev` profile llm_brain is not a translator but has a
 **sanitizer**: it removes the fields the target model doesn't accept. A
