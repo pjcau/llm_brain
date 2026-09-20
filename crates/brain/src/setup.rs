@@ -16,6 +16,32 @@ pub fn data_dir() -> String {
 
 /// Env block for Claude Code. See docs/architecture/client-compatibility.md
 /// for why each variable is there.
+/// Claude Code's main model: the `agent` tier when configured, else `fast`.
+pub fn claude_main_tier(cfg: &Config) -> &'static str {
+    if cfg.model_for_tier("agent").is_ok() {
+        "agent"
+    } else {
+        "fast"
+    }
+}
+
+/// Shell function that runs the host's Claude Code through the llm_brain
+/// proxy: main model = `brain/<agent tier>`, background tasks = `brain/fast`.
+pub fn claude_code_proxy(cfg: &Config) -> Result<String> {
+    let main = claude_main_tier(cfg);
+    let _ = cfg.model_for_tier("fast")?;
+    Ok(format!(
+        "# Claude Code through the llm_brain proxy (dev profile). Paste into ~/.bashrc, run `px-claude` anywhere.\n\
+         px-claude() {{\n\
+           ANTHROPIC_BASE_URL=\"$BRAIN_BASE_URL\" ANTHROPIC_AUTH_TOKEN=\"$BRAIN_DEV_KEY\" \\\n\
+           ANTHROPIC_MODEL=brain/{main} ANTHROPIC_DEFAULT_HAIKU_MODEL=brain/fast \\\n\
+           CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 \\\n\
+           claude \"$@\"\n\
+         }}\n\
+         # cheaper main model for simple sessions: ANTHROPIC_MODEL=brain/fast px-claude\n",
+    ))
+}
+
 pub fn claude_code(cfg: &Config, profile: &str) -> Result<String> {
     let p = cfg.profile(profile)?;
     let fast = cfg.model_for_tier("fast")?;
@@ -247,6 +273,26 @@ mod tests {
         assert!(out.contains("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1"));
         assert!(out.contains("/model deepseek/deepseek-v4-pro"));
         assert!(claude_code(&cfg(), "nope").is_err());
+    }
+
+    #[test]
+    fn claude_proxy_function_uses_the_agent_tier_for_the_main_model() {
+        let out = claude_code_proxy(&cfg()).unwrap();
+        assert!(
+            out.contains("ANTHROPIC_MODEL=brain/fast ANTHROPIC_DEFAULT_HAIKU_MODEL=brain/fast"),
+            "no agent tier in this config: {out}"
+        );
+        let with_agent = Config::from_yaml(
+            "profiles:\n  - {name: dev, tier: fast, daily_limit_usd: 3.0, monthly_soft_usd: 30.0}\n",
+            "tiers:\n  fast: {model: f}\n  agent: {model: deepseek/deepseek-v4-pro}\n",
+        )
+        .unwrap();
+        let out = claude_code_proxy(&with_agent).unwrap();
+        assert!(
+            out.contains("ANTHROPIC_MODEL=brain/agent ANTHROPIC_DEFAULT_HAIKU_MODEL=brain/fast"),
+            "{out}"
+        );
+        assert!(out.contains("ANTHROPIC_AUTH_TOKEN=\"$BRAIN_DEV_KEY\""));
     }
 
     #[test]

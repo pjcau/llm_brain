@@ -502,7 +502,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT substr(ts, 1, 10) AS day, profile, model,
                     COUNT(*), SUM(status >= 400), SUM(input_tokens + cache_write_tokens), SUM(cache_read_tokens), SUM(output_tokens),
-                    SUM(cost_usd), AVG(latency_ms), SUM(degraded != ''), SUM(stream)
+                    SUM(cost_usd), AVG(latency_ms), SUM((degraded LIKE 'fast-only%' OR degraded LIKE 'max-tokens%' OR degraded LIKE 'blocked%' OR degraded LIKE 'rate-limited%')), SUM(stream)
              FROM requests WHERE ts >= datetime('now', ?1)
              GROUP BY day, profile, model ORDER BY day DESC, profile, model",
         )?;
@@ -528,7 +528,7 @@ impl Db {
     /// Ring 2 view of today (UTC): per profile, live spend and rejections from the proxy.
     pub fn today_by_profile(&self) -> Result<Vec<TodayProfile>> {
         let mut stmt = self.conn.prepare(
-            "SELECT profile, COUNT(*), SUM(cost_usd), SUM(status = 429), SUM(status >= 400 AND status != 429), SUM(degraded IN ('fast-only','max-tokens'))
+            "SELECT profile, COUNT(*), SUM(cost_usd), SUM(status = 429), SUM(status >= 400 AND status != 429), SUM((degraded LIKE 'fast-only%' OR degraded LIKE 'max-tokens%' OR degraded LIKE 'blocked%' OR degraded LIKE 'rate-limited%'))
              FROM requests WHERE ts >= date('now') GROUP BY profile",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -565,7 +565,7 @@ impl Db {
         let mut stmt = self.conn.prepare(
             "SELECT profile, user, MIN(ts), MAX(ts), COUNT(*), SUM(status >= 400),
                     SUM(input_tokens + cache_write_tokens), SUM(cache_read_tokens), SUM(output_tokens),
-                    SUM(cost_usd), AVG(latency_ms), GROUP_CONCAT(DISTINCT model), SUM(degraded != '')
+                    SUM(cost_usd), AVG(latency_ms), GROUP_CONCAT(DISTINCT model), SUM((degraded LIKE 'fast-only%' OR degraded LIKE 'max-tokens%' OR degraded LIKE 'blocked%' OR degraded LIKE 'rate-limited%'))
              FROM requests WHERE ts >= datetime('now', ?1) AND user != ''
              GROUP BY profile, user ORDER BY MAX(ts) DESC LIMIT ?2",
         )?;
@@ -867,6 +867,24 @@ mod tests {
         );
         assert!((dev.cost_usd - 0.75).abs() < 1e-9);
         assert_eq!(dev.avg_latency_ms, Some(100.0));
+        // notes (cap applied, fields removed) are not degradations; budget actions are
+        let mut noted = row("dev", 0.0);
+        noted.degraded = "max_tokens:16384 sanitized:output_config".into();
+        db.insert_request(&noted).unwrap();
+        let mut forced = row("dev", 0.0);
+        forced.degraded = "fast-only max_tokens:16384".into();
+        db.insert_request(&forced).unwrap();
+        let agg = db.daily_requests(1).unwrap();
+        assert_eq!(agg.iter().find(|a| a.profile == "dev").unwrap().degraded, 1);
+        assert_eq!(
+            db.today_by_profile()
+                .unwrap()
+                .iter()
+                .find(|t| t.profile == "dev")
+                .unwrap()
+                .degraded,
+            1
+        );
         // sessions group by (profile, user) and skip anonymous requests
         let mut s1 = row("dev", 0.01);
         s1.user = "cc:abc".into();
@@ -886,7 +904,7 @@ mod tests {
         assert!((sessions[0].cost_usd - 0.02).abs() < 1e-9);
         let today = db.today_by_profile().unwrap();
         let d = today.iter().find(|t| t.profile == "dev").unwrap();
-        assert_eq!((d.requests, d.rejected, d.errors), (4, 0, 0));
+        assert_eq!((d.requests, d.rejected, d.errors), (6, 0, 0));
         assert!((d.spent_usd - 0.77).abs() < 1e-9);
         db.insert_audit("1.2.3.4", "brain_x_…", "unknown").unwrap();
         assert_eq!(db.recent_audit(5).unwrap()[0].outcome, "unknown");

@@ -151,6 +151,9 @@ enum SetupCmd {
         /// Print a shell function that runs Claude Code from this Docker image instead
         #[arg(long, value_name = "IMAGE")]
         docker: Option<String>,
+        /// Print the `px-claude` function (through the llm_brain proxy)
+        #[arg(long)]
+        proxy: bool,
     },
     /// Env block + .aider.model.metadata.json for aider
     Aider {
@@ -419,12 +422,17 @@ async fn main() -> Result<()> {
             SetupCmd::ClaudeCode {
                 profile,
                 docker: Some(image),
+                ..
             } => {
                 print!("{}", setup::claude_code_docker(&cfg, &profile, &image)?)
+            }
+            SetupCmd::ClaudeCode { proxy: true, .. } => {
+                print!("{}", setup::claude_code_proxy(&cfg)?)
             }
             SetupCmd::ClaudeCode {
                 profile,
                 docker: None,
+                ..
             } => print!("{}", setup::claude_code(&cfg, &profile)?),
             SetupCmd::Aider {
                 profile,

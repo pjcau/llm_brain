@@ -18,6 +18,13 @@ tiers:
     input_usd_per_m: 0.075
     output_usd_per_m: 0.5
     max_output_tokens: 32768
+  agent:                              # Claude Code's main model through the proxy: reliable tool loop
+    model: deepseek/deepseek-v4-pro     # $0.42 / $0.85 per M, 1M context, several providers
+    fallback: qwen/qwen3.7-plus
+    context: 1048576
+    input_usd_per_m: 0.42
+    output_usd_per_m: 0.85
+    max_output_tokens: 32768
   premium:
     model: null
     fallback: null
