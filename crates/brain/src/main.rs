@@ -1,5 +1,5 @@
 //! `brain` — llm_brain CLI. Phase 0 surface:
-//!   brain upstream provision|list  OpenRouter keys, one per profile, daily limits
+//!   brain upstream provision|sync|list  OpenRouter keys, one per profile, daily limits
 //!   brain keys create|list|revoke  client keys (Phase 1): brain_<profile>_…
 //!   brain usage snapshot|report    spend per profile from GET /key, stored in SQLite
 //!   brain setup claude-code|aider  client configuration for a profile
@@ -123,6 +123,12 @@ enum UpstreamCmd {
         /// Recreate keys even for profiles that already have one in the env
         #[arg(long)]
         force: bool,
+        /// Only these profiles
+        #[arg(long, value_delimiter = ',')]
+        only: Option<Vec<String>>,
+    },
+    /// Align the daily limits of existing keys with profiles.yaml, secrets unchanged (needs OPENROUTER_MANAGEMENT_KEY)
+    Sync {
         /// Only these profiles
         #[arg(long, value_delimiter = ',')]
         only: Option<Vec<String>>,
@@ -272,6 +278,30 @@ async fn main() -> Result<()> {
                         }
                         eprintln!("# then remove OPENROUTER_MANAGEMENT_KEY from .env");
                     }
+                }
+                UpstreamCmd::Sync { only } => {
+                    let (changed, missing) =
+                        keys::sync_limits(&cfg, &client, mgmt, only.as_deref()).await?;
+                    if !missing.is_empty() {
+                        eprintln!(
+                            "no key on OpenRouter for: {} (run `brain upstream provision`)",
+                            missing.join(", ")
+                        );
+                    }
+                    if changed.is_empty() {
+                        println!("all limits already match profiles.yaml");
+                    }
+                    for c in &changed {
+                        println!(
+                            "{}: daily limit {} → ${:.2}",
+                            c.profile,
+                            c.from
+                                .map(|f| format!("${f:.2}"))
+                                .unwrap_or_else(|| "-".into()),
+                            c.to
+                        );
+                    }
+                    eprintln!("# then remove OPENROUTER_MANAGEMENT_KEY from .env");
                 }
                 UpstreamCmd::List => {
                     let list = client.list_keys(mgmt).await?;

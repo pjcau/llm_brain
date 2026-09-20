@@ -54,8 +54,8 @@ only in an uncommitted `.env` (mode 0600) or in your shell.
 profiles:
   - name: dev          # Claude Code + aider on the laptop
     tier: fast
-    daily_limit_usd: 3.0
-    monthly_soft_usd: 30.0
+    daily_limit_usd: 5.0     # raised from 3.0 on 2026-09-20, see the budget page
+    monthly_soft_usd: 60.0
     l2_cache: off
   - name: ago          # agent-orchestrator as a client (not integrated yet)
     tier: fast
@@ -329,6 +329,7 @@ and by the container test in CI.
 | Command | Needs |
 |---------|-------|
 | `brain upstream provision [--force] [--only dev,car]` | `OPENROUTER_MANAGEMENT_KEY` |
+| `brain upstream sync [--only dev]` — PATCH the daily limit of the existing keys to match `profiles.yaml`, the secrets do not change | `OPENROUTER_MANAGEMENT_KEY` |
 | `brain upstream list` | `OPENROUTER_MANAGEMENT_KEY` |
 | `brain keys create --profile P --name N [--expires DATE] [--ip CIDRs]` / `keys list` / `keys revoke` | the SQLite file (run on the server) |
 | `brain usage snapshot` / `usage report [--days 7]` | `OPENROUTER_KEY_*` |

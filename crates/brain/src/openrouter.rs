@@ -101,6 +101,30 @@ impl Client {
         })
     }
 
+    /// `PATCH /keys/{hash}` with the management key: changes the daily limit
+    /// of an existing key, the secret stays the same.
+    pub async fn update_key_limit(
+        &self,
+        management_key: &str,
+        hash: &str,
+        limit: f64,
+    ) -> Result<KeyData> {
+        let resp = self
+            .http
+            .patch(format!("{}/keys/{hash}", self.base_url))
+            .bearer_auth(management_key)
+            .json(&serde_json::json!({ "limit": limit, "limit_reset": "daily" }))
+            .send()
+            .await
+            .context("PATCH /keys/{hash}")?;
+        let resp = check(resp).await?;
+        Ok(resp
+            .json::<DataOne>()
+            .await
+            .context("decoding updated key")?
+            .data)
+    }
+
     /// `GET /keys` with the management key.
     pub async fn list_keys(&self, management_key: &str) -> Result<Vec<KeyData>> {
         let resp = self

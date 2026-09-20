@@ -5,8 +5,8 @@ profiles:
   - name: dev
     description: Claude Code + aider on the laptop
     tier: fast
-    daily_limit_usd: 3.0
-    monthly_soft_usd: 30.0
+    daily_limit_usd: 5.0
+    monthly_soft_usd: 60.0
     l2_cache: off
   - name: ago
     description: agent-orchestrator as a client

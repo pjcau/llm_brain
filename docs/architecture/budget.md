@@ -78,14 +78,25 @@ chat-history tokens.
 
 ## Budget per profile
 
-Decided on 2026-09-19. The delicate point: `dev` can go up to **3 €/day**,
-but 3 × 30 = 90 € would blow the monthly ceiling. So the daily figure is a
-**peak cap** (heavy days), not a pace: a **monthly** limit is needed too,
-and they are two different mechanisms.
+Decided on 2026-09-19, `dev` raised on 2026-09-20. The delicate point: the
+daily figure is a **peak cap** (heavy days), not a pace: a **monthly** limit
+is needed too, and they are two different mechanisms.
+
+What a real day costs (measured on 2026-09-20, the first full day of Claude
+Code through the proxy): **≈ 2.2 $** for 286 requests, 124 of them on
+`deepseek-v4-pro` with ~60k-token contexts (Claude Code resends the whole
+conversation; cache reads make it cheap but not free). At the 3 $ cap the
+70% ring kicked in at 18:38 UTC and forced 48 requests to `fast`, which is
+exactly the "it works worse now" the user sees. The cap was raised to 5 $/day
+and 60 $/month soft: a full month of such days is ≈ 60 $, still a third of
+the subscription it replaces. Changing a limit is two steps: edit
+`profiles.yaml` (the layer's rings follow immediately after a restart) and
+`brain upstream sync --only dev` (the OpenRouter key's hard wall, PATCHed in
+place — the secret does not change).
 
 | Profile | €/day (peak, hard on the OpenRouter key) | €/month (soft in the layer, with degradation) | Notes |
 |---------|------|------|------|
-| `dev` (Claude Code + aider) | **3.00** | **30** | degradation on the monthly: at 70% (21 €) `reasoning` disappears |
+| `dev` (Claude Code + aider) | **5.00** (was 3.00 until 2026-09-20) | **60** (was 30) | degradation at 70% of either window: `agent`/`reasoning` requests go to `fast` |
 | `ago` (agent-orchestrator) | 1.00 | 5 | same tier as `dev`, separate budget |
 | `benchmark` | 0.50 | 5 | separate key, never at the expense of dev |
 | `assistant` + `car` | 0.20 | 3 | almost only `fast` |

@@ -58,6 +58,54 @@ pub async fn provision(
     Ok((created, skipped))
 }
 
+pub struct Synced {
+    pub profile: String,
+    pub from: Option<f64>,
+    pub to: f64,
+}
+
+/// Aligns the daily limit of every existing `llm_brain/<profile>` key with
+/// `config/profiles.yaml` (PATCH, the secret does not change). Returns the
+/// keys that were changed and the profiles that have no key on OpenRouter.
+pub async fn sync_limits(
+    cfg: &Config,
+    client: &Client,
+    management_key: &str,
+    only: Option<&[String]>,
+) -> Result<(Vec<Synced>, Vec<String>)> {
+    let existing = client.list_keys(management_key).await?;
+    let mut changed = Vec::new();
+    let mut missing = Vec::new();
+    for p in &cfg.profiles {
+        if let Some(only) = only
+            && !only.iter().any(|o| o == &p.name)
+        {
+            continue;
+        }
+        let Some(k) = existing
+            .iter()
+            .find(|k| k.name == key_name(&p.name) && !k.disabled)
+        else {
+            missing.push(p.name.clone());
+            continue;
+        };
+        if k.limit
+            .is_some_and(|l| (l - p.daily_limit_usd).abs() < 0.001)
+        {
+            continue;
+        }
+        let updated = client
+            .update_key_limit(management_key, &k.hash, p.daily_limit_usd)
+            .await?;
+        changed.push(Synced {
+            profile: p.name.clone(),
+            from: k.limit,
+            to: updated.limit.unwrap_or(p.daily_limit_usd),
+        });
+    }
+    Ok((changed, missing))
+}
+
 pub fn render_list(keys: &[KeyData]) -> String {
     let mut out = format!(
         "{:<28} {:<10} {:>7} {:>7} {:>9} {}\n",
@@ -151,6 +199,42 @@ mod tests {
         assert_eq!(created.len(), 1);
         assert_eq!(created[0].profile, "dev");
         assert!(skipped.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sync_patches_only_keys_whose_limit_differs() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": [
+                {"hash": "hdev", "name": "llm_brain/dev", "limit": 3.0, "limit_reset": "daily"},
+                {"hash": "hbench", "name": "llm_brain/benchmark", "limit": 0.5, "limit_reset": "daily"}
+            ]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/keys/hdev"))
+            .and(body_partial_json(serde_json::json!({"limit": 5.0, "limit_reset": "daily"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"hash": "hdev", "name": "llm_brain/dev", "limit": 5.0, "limit_reset": "daily"}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let cfg = Config::from_yaml(
+            "profiles:\n  - {name: dev, tier: fast, daily_limit_usd: 5.0, monthly_soft_usd: 60.0}\n  - {name: benchmark, tier: fast, daily_limit_usd: 0.5, monthly_soft_usd: 5.0}\n  - {name: car, tier: fast, daily_limit_usd: 0.2, monthly_soft_usd: 3.0}\n",
+            "tiers:\n  fast: {model: m}\n",
+        )
+        .unwrap();
+        let (changed, missing) = sync_limits(&cfg, &Client::new(server.uri()), "mgmt", None)
+            .await
+            .unwrap();
+        // benchmark already matches → no PATCH (the mock expects exactly one call)
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].profile, "dev");
+        assert_eq!(changed[0].from, Some(3.0));
+        assert_eq!(changed[0].to, 5.0);
+        assert_eq!(missing, vec!["car".to_string()]);
     }
 
     #[test]
