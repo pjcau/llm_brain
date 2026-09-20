@@ -758,7 +758,33 @@ async fn proxy(
             r.latency_ms = latency_ms;
             st2.record(r);
         });
-        let tapped = tap::Tap::new(upstream.bytes_stream(), dialect, started, recorder);
+        let mut tapped = tap::Tap::new(upstream.bytes_stream(), dialect, started, recorder);
+        tapped.diag = {
+            let msgs = json.get("messages").and_then(Value::as_array);
+            let n = msgs.map(|m| m.len()).unwrap_or(0);
+            let last = msgs
+                .and_then(|m| m.last())
+                .and_then(|m| m.get("role"))
+                .and_then(Value::as_str)
+                .unwrap_or("-");
+            let last_kind = msgs
+                .and_then(|m| m.last())
+                .and_then(|m| m.get("content"))
+                .and_then(Value::as_array)
+                .and_then(|c| c.first())
+                .and_then(|b| b.get("type"))
+                .and_then(Value::as_str)
+                .unwrap_or("text");
+            let tools = json
+                .get("tools")
+                .and_then(Value::as_array)
+                .map(|t| t.len())
+                .unwrap_or(0);
+            format!(
+                "{} {} msgs={n} last={last}/{last_kind} tools={tools} {}",
+                profile.name, resolved.model, degraded
+            )
+        };
         let mut resp = Response::new(Body::from_stream(tapped));
         *resp.status_mut() = status;
         *resp.headers_mut() = out_headers;

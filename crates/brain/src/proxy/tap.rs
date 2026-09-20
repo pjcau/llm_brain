@@ -18,6 +18,10 @@ pub struct Tap<S> {
     recorder: Option<Recorder>,
     started: Instant,
     completed: bool,
+    /// First bytes of the stream, kept for the empty-reply diagnostic.
+    head: Vec<u8>,
+    /// Request shape for the diagnostic line (messages, last role, tools, sanitized fields).
+    pub diag: String,
 }
 
 impl<S> Tap<S> {
@@ -31,10 +35,25 @@ impl<S> Tap<S> {
             recorder: Some(recorder),
             started,
             completed: false,
+            head: Vec::new(),
+            diag: String::new(),
         }
     }
 
     fn finish(&mut self) {
+        if self.completed && self.usage.seen && self.usage.output_tokens <= 1 {
+            // Diagnostic for the "model answers nothing" failure seen with Claude Code:
+            // what the upstream actually sent back, and what the request looked like.
+            let head = String::from_utf8_lossy(&self.head);
+            eprintln!(
+                "empty reply [{}] upstream stream head: {}",
+                self.diag,
+                head.replace('\n', " ")
+                    .chars()
+                    .take(1500)
+                    .collect::<String>()
+            );
+        }
         if let Some(r) = self.recorder.take() {
             r(
                 std::mem::take(&mut self.usage),
@@ -55,6 +74,10 @@ where
         let this = &mut *self;
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(chunk))) => {
+                if this.head.len() < 4096 {
+                    let take = (4096 - this.head.len()).min(chunk.len());
+                    this.head.extend_from_slice(&chunk[..take]);
+                }
                 this.scanner.feed(this.dialect, &chunk, &mut this.usage);
                 Poll::Ready(Some(Ok(chunk)))
             }
