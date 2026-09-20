@@ -4,7 +4,7 @@
 //! is current without cron.
 
 use crate::config::Config;
-use crate::db::{BenchRun, DailyUsage, Db};
+use crate::db::{BenchRun, DailyRequests, DailyUsage, Db};
 use crate::events::{DailyStat, anomalies};
 use axum::{Router, extract::State, response::Html, routing::get};
 use serde::Serialize;
@@ -25,6 +25,8 @@ pub struct Summary {
     pub events: Vec<EventRow>,
     pub bench: Vec<BenchRow>,
     pub anomalies: Vec<String>,
+    /// Proxied traffic (Phase 1): the precise source, from the `requests` table.
+    pub proxied: Vec<DailyRequests>,
 }
 
 #[derive(Serialize)]
@@ -81,6 +83,7 @@ pub fn summary(
     usage: &[DailyUsage],
     stats: &[DailyStat],
     bench: &[BenchRun],
+    proxied: Vec<DailyRequests>,
 ) -> Summary {
     let usage = usage
         .iter()
@@ -140,6 +143,7 @@ pub fn summary(
         events,
         bench,
         anomalies: anomalies(stats),
+        proxied,
     }
 }
 
@@ -150,6 +154,7 @@ fn load(state: &AppState) -> anyhow::Result<Summary> {
         &db.daily_usage(state.days)?,
         &db.daily_stats(state.days)?,
         &db.bench_runs(None)?,
+        db.daily_requests(state.days)?,
     ))
 }
 
@@ -200,7 +205,8 @@ th{color:var(--mut);font-weight:600}td.n,th.n{text-align:right}
 <main>
 <section><h2>Budget · today per profile</h2><table id="usage"></table></section>
 <section><h2>Anomalies</h2><ul id="anom"></ul></section>
-<section><h2>Requests · day × tool × model</h2><table id="events"></table></section>
+<section><h2>Proxy · day × profile × model (Phase 1, exact)</h2><table id="proxied"></table></section>
+<section><h2>Tool logs · day × tool × model (Phase 0, from aider/Claude Code files)</h2><table id="events"></table></section>
 <section><h2>Benchmark runs</h2><table id="bench"></table></section>
 </main>
 <script>
@@ -213,6 +219,8 @@ async function load(){
   document.getElementById('usage').innerHTML='<tr><th>profile</th><th class=n>spent $</th><th class=n>limit $</th><th>use</th><th>state</th></tr>'+
     (s.usage.filter(u=>u.day===today).map(u=>`<tr><td>${esc(u.profile)}</td><td class=n>${f(u.spent_usd)}</td><td class=n>${f(u.limit_usd,2)}</td><td><div class="bar ${u.state}"><i style="width:${Math.min(100,u.pct)}%"></i></div></td><td>${u.pct.toFixed(0)}% ${esc(u.state)}</td></tr>`).join('')||'<tr><td class=empty colspan=5>no snapshots yet</td></tr>');
   document.getElementById('anom').innerHTML=s.anomalies.length?s.anomalies.map(a=>`<li class=anom>${esc(a)}</li>`).join(''):'<li class=empty>none</li>';
+  document.getElementById('proxied').innerHTML='<tr><th>day</th><th>profile</th><th>model</th><th class=n>req</th><th class=n>err</th><th class=n>degraded</th><th class=n>stream</th><th class=n>prompt tok</th><th class=n>cache read</th><th class=n>out tok</th><th class=n>cost $</th><th class=n>lat s</th></tr>'+
+    (s.proxied.map(p=>`<tr><td>${p.day}</td><td>${esc(p.profile)}</td><td>${esc(p.model)}</td><td class=n>${p.requests}</td><td class="n ${p.errors?'fail':''}">${p.errors}</td><td class=n>${p.degraded}</td><td class=n>${p.streamed}</td><td class=n>${p.input_tokens}</td><td class=n>${p.cache_read_tokens}</td><td class=n>${p.output_tokens}</td><td class=n>${f(p.cost_usd,4)}</td><td class=n>${p.avg_latency_ms==null?'-':(p.avg_latency_ms/1000).toFixed(1)}</td></tr>`).join('')||'<tr><td class=empty colspan=12>no proxied requests yet</td></tr>');
   document.getElementById('events').innerHTML='<tr><th>day</th><th>tool</th><th>model</th><th class=n>req</th><th class=n>err</th><th class=n>bad edits</th><th class=n>retries</th><th class=n>prompt tok</th><th class=n>out tok</th><th class=n>cache</th><th class=n>est $</th><th class=n>lat s</th></tr>'+
     (s.events.map(e=>`<tr><td>${e.day}</td><td>${esc(e.tool)}</td><td>${esc(e.model)}</td><td class=n>${e.requests}</td><td class="n ${e.errors?'fail':''}">${e.errors}</td><td class=n>${e.edit_failed}</td><td class=n>${e.retries}</td><td class=n>${e.prompt_tokens}</td><td class=n>${e.output_tokens}</td><td class=n>${e.cache_hit==null?'-':(e.cache_hit*100).toFixed(0)+'%'}</td><td class=n>${f(e.est_cost_usd)}</td><td class=n>${f(e.avg_latency_s,1)}</td></tr>`).join('')||'<tr><td class=empty colspan=12>no events yet</td></tr>');
   document.getElementById('bench').innerHTML='<tr><th>when</th><th>run</th><th>task</th><th>tool</th><th>tier</th><th>model</th><th>result</th><th class=n>s</th><th class=n>$</th><th>notes</th></tr>'+
@@ -266,7 +274,7 @@ mod tests {
             exit_code: Some(0),
             notes: String::new(),
         }];
-        let s = summary(&cfg(), &usage, &stats, &bench);
+        let s = summary(&cfg(), &usage, &stats, &bench, vec![]);
         assert_eq!(s.usage[0].state, "degrade-fast");
         assert!((s.usage[0].pct - 80.0).abs() < 1e-9);
         assert_eq!(s.events[0].requests, 10);

@@ -1,6 +1,7 @@
 //! SQLite persistence for Phase 0: usage snapshots per profile and benchmark
 //! runs. One file, WAL mode; `Db::memory()` for tests.
 
+use crate::auth::ApiKey;
 use crate::events::{DailyStat, Event};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -36,6 +37,46 @@ pub struct BenchRun {
     pub seconds: f64,
     pub exit_code: Option<i32>,
     pub notes: String,
+}
+
+/// One proxied request, as recorded by the Phase 1 proxy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestRow {
+    pub ts: DateTime<Utc>,
+    pub profile: String,
+    pub key_prefix: String,
+    pub user: String,
+    /// "openai" | "anthropic"
+    pub dialect: String,
+    pub tier: String,
+    pub model: String,
+    pub status: i64,
+    pub input_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: f64,
+    pub latency_ms: i64,
+    pub stream: bool,
+    /// "" | "fast-only" | "max-tokens" | "blocked"
+    pub degraded: String,
+}
+
+/// Aggregated proxied traffic for the board.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub struct DailyRequests {
+    pub day: String,
+    pub profile: String,
+    pub model: String,
+    pub requests: i64,
+    pub errors: i64,
+    pub input_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: f64,
+    pub avg_latency_ms: Option<f64>,
+    pub degraded: i64,
+    pub streamed: i64,
 }
 
 /// One row of `brain usage report`: the max daily usage seen per (day, profile).
@@ -99,6 +140,53 @@ CREATE TABLE IF NOT EXISTS ingest_files (
   offset INTEGER NOT NULL,
   model_hint TEXT NOT NULL DEFAULT ''
 );
+
+-- client keys (Phase 1): sha256 only, never the key
+CREATE TABLE IF NOT EXISTS api_keys (
+  id INTEGER PRIMARY KEY,
+  key_hash TEXT UNIQUE NOT NULL,
+  prefix TEXT NOT NULL,
+  profile TEXT NOT NULL,
+  name TEXT NOT NULL,
+  ip_allow TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  expires_at TEXT,
+  last_used_at TEXT,
+  revoked_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS api_keys_profile_name_active ON api_keys(profile, name) WHERE revoked_at IS NULL;
+
+-- authentication failures and revocations
+CREATE TABLE IF NOT EXISTS auth_audit (
+  id INTEGER PRIMARY KEY,
+  ts TEXT NOT NULL,
+  ip TEXT NOT NULL,
+  prefix TEXT NOT NULL,
+  outcome TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS auth_audit_ts ON auth_audit(ts);
+
+-- one row per proxied request (Phase 1): the source of budget and the board
+CREATE TABLE IF NOT EXISTS requests (
+  id INTEGER PRIMARY KEY,
+  ts TEXT NOT NULL,
+  profile TEXT NOT NULL,
+  key_prefix TEXT NOT NULL,
+  user TEXT NOT NULL DEFAULT '',
+  dialect TEXT NOT NULL,
+  tier TEXT NOT NULL,
+  model TEXT NOT NULL,
+  status INTEGER NOT NULL,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  stream INTEGER NOT NULL DEFAULT 0,
+  degraded TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS requests_profile_ts ON requests(profile, ts);
 "#;
 
 impl Db {
@@ -238,6 +326,163 @@ impl Db {
         Ok(())
     }
 
+    // ----- client keys -----------------------------------------------------
+
+    pub fn insert_api_key(&self, k: &ApiKey) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO api_keys (key_hash, prefix, profile, name, ip_allow, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                k.key_hash,
+                k.prefix,
+                k.profile,
+                k.name,
+                k.ip_allow,
+                k.created_at.to_rfc3339(),
+                k.expires_at.map(|d| d.to_rfc3339())
+            ],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    fn row_to_key(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApiKey> {
+        let ts = |s: Option<String>| {
+            s.and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                .map(|d| d.with_timezone(&Utc))
+        };
+        Ok(ApiKey {
+            id: r.get(0)?,
+            key_hash: r.get(1)?,
+            prefix: r.get(2)?,
+            profile: r.get(3)?,
+            name: r.get(4)?,
+            ip_allow: r.get(5)?,
+            created_at: ts(Some(r.get::<_, String>(6)?)).unwrap_or_else(Utc::now),
+            expires_at: ts(r.get(7)?),
+            last_used_at: ts(r.get(8)?),
+            revoked_at: ts(r.get(9)?),
+        })
+    }
+
+    const KEY_COLS: &'static str = "id, key_hash, prefix, profile, name, ip_allow, created_at, expires_at, last_used_at, revoked_at";
+
+    pub fn api_key_by_hash(&self, key_hash: &str) -> Result<Option<ApiKey>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {} FROM api_keys WHERE key_hash = ?1",
+            Self::KEY_COLS
+        ))?;
+        let mut rows = stmt.query(params![key_hash])?;
+        match rows.next()? {
+            Some(r) => Ok(Some(Self::row_to_key(r)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn api_keys(&self, profile: Option<&str>) -> Result<Vec<ApiKey>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {} FROM api_keys WHERE (?1 IS NULL OR profile = ?1) ORDER BY profile, created_at",
+            Self::KEY_COLS
+        ))?;
+        let rows = stmt.query_map(params![profile], Self::row_to_key)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Marks the active key `profile`/`name` revoked; false if none was active.
+    pub fn revoke_api_key(&self, profile: &str, name: &str) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE api_keys SET revoked_at = ?1 WHERE profile = ?2 AND name = ?3 AND revoked_at IS NULL",
+            params![Utc::now().to_rfc3339(), profile, name],
+        )?;
+        Ok(n > 0)
+    }
+
+    pub fn touch_api_key(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE api_keys SET last_used_at = ?1 WHERE id = ?2",
+            params![Utc::now().to_rfc3339(), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_audit(&self, ip: &str, prefix: &str, outcome: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO auth_audit (ts, ip, prefix, outcome) VALUES (?1, ?2, ?3, ?4)",
+            params![Utc::now().to_rfc3339(), ip, prefix, outcome],
+        )?;
+        Ok(())
+    }
+
+    // ----- proxied requests --------------------------------------------------
+
+    pub fn insert_request(&self, r: &RequestRow) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO requests (ts, profile, key_prefix, user, dialect, tier, model, status, input_tokens, cache_read_tokens,
+                                   cache_write_tokens, output_tokens, cost_usd, latency_ms, stream, degraded)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            params![
+                r.ts.to_rfc3339(),
+                r.profile,
+                r.key_prefix,
+                r.user,
+                r.dialect,
+                r.tier,
+                r.model,
+                r.status,
+                r.input_tokens,
+                r.cache_read_tokens,
+                r.cache_write_tokens,
+                r.output_tokens,
+                r.cost_usd,
+                r.latency_ms,
+                r.stream as i32,
+                r.degraded
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Proxied traffic per UTC day × profile × model over the last `days`.
+    pub fn daily_requests(&self, days: u32) -> Result<Vec<DailyRequests>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT substr(ts, 1, 10) AS day, profile, model,
+                    COUNT(*), SUM(status >= 400), SUM(input_tokens + cache_write_tokens), SUM(cache_read_tokens), SUM(output_tokens),
+                    SUM(cost_usd), AVG(latency_ms), SUM(degraded != ''), SUM(stream)
+             FROM requests WHERE ts >= datetime('now', ?1)
+             GROUP BY day, profile, model ORDER BY day DESC, profile, model",
+        )?;
+        let rows = stmt.query_map(params![format!("-{days} days")], |r| {
+            Ok(DailyRequests {
+                day: r.get(0)?,
+                profile: r.get(1)?,
+                model: r.get(2)?,
+                requests: r.get(3)?,
+                errors: r.get(4)?,
+                input_tokens: r.get(5)?,
+                cache_read_tokens: r.get(6)?,
+                output_tokens: r.get(7)?,
+                cost_usd: r.get(8)?,
+                avg_latency_ms: r.get(9)?,
+                degraded: r.get(10)?,
+                streamed: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// USD spent by `profile` since `since` (UTC, RFC 3339 prefix compare works on the stored format).
+    pub fn spent_since(&self, profile: &str, since: DateTime<Utc>) -> Result<f64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(SUM(cost_usd), 0) FROM requests WHERE profile = ?1 AND ts >= ?2",
+            params![profile, since.to_rfc3339()],
+            |r| r.get(0),
+        )?)
+    }
+
+    #[cfg(test)]
+    pub fn conn_for_tests(&self) -> &Connection {
+        &self.conn
+    }
+
     pub fn insert_bench_run(&self, b: &BenchRun) -> Result<()> {
         self.conn.execute(
             "INSERT INTO bench_runs (ts, run_id, task_id, tool, tier, model, passed, cost_usd, seconds, exit_code, notes)
@@ -362,6 +607,119 @@ mod tests {
         db.set_ingest_state("/x", 42, "m").unwrap();
         db.set_ingest_state("/x", 84, "m2").unwrap();
         assert_eq!(db.ingest_state("/x").unwrap(), (84, "m2".to_string()));
+    }
+
+    #[test]
+    fn api_keys_insert_lookup_revoke_and_audit() {
+        let db = Db::memory().unwrap();
+        let key = ApiKey {
+            id: 0,
+            key_hash: "abc".into(),
+            prefix: "brain_car_…1234".into(),
+            profile: "car".into(),
+            name: "prod".into(),
+            ip_allow: String::new(),
+            created_at: Utc::now(),
+            expires_at: None,
+            last_used_at: None,
+            revoked_at: None,
+        };
+        let id = db.insert_api_key(&key).unwrap();
+        let found = db.api_key_by_hash("abc").unwrap().unwrap();
+        assert_eq!(
+            (found.id, found.profile.as_str(), found.name.as_str()),
+            (id, "car", "prod")
+        );
+        assert!(db.api_key_by_hash("nope").unwrap().is_none());
+        // same active name in the same profile is refused
+        assert!(
+            db.insert_api_key(&ApiKey {
+                key_hash: "other".into(),
+                ..key.clone()
+            })
+            .is_err()
+        );
+        db.touch_api_key(id).unwrap();
+        assert!(
+            db.api_key_by_hash("abc")
+                .unwrap()
+                .unwrap()
+                .last_used_at
+                .is_some()
+        );
+        assert!(db.revoke_api_key("car", "prod").unwrap());
+        assert!(
+            !db.revoke_api_key("car", "prod").unwrap(),
+            "already revoked"
+        );
+        assert!(
+            db.api_key_by_hash("abc")
+                .unwrap()
+                .unwrap()
+                .revoked_at
+                .is_some()
+        );
+        // after revocation the name can be reused
+        assert!(
+            db.insert_api_key(&ApiKey {
+                key_hash: "other".into(),
+                ..key.clone()
+            })
+            .is_ok()
+        );
+        assert_eq!(db.api_keys(Some("car")).unwrap().len(), 2);
+        assert!(db.api_keys(Some("dev")).unwrap().is_empty());
+        db.insert_audit("1.2.3.4", "brain_car_…", "unknown")
+            .unwrap();
+        db.insert_audit("1.2.3.4", "brain_car_…", "unknown")
+            .unwrap();
+    }
+
+    #[test]
+    fn requests_sum_spend_per_profile_since() {
+        let db = Db::memory().unwrap();
+        let row = |profile: &str, cost: f64| RequestRow {
+            ts: Utc::now(),
+            profile: profile.into(),
+            key_prefix: "p".into(),
+            user: String::new(),
+            dialect: "openai".into(),
+            tier: "fast".into(),
+            model: "m".into(),
+            status: 200,
+            input_tokens: 10,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            output_tokens: 5,
+            cost_usd: cost,
+            latency_ms: 100,
+            stream: false,
+            degraded: String::new(),
+        };
+        db.insert_request(&row("dev", 0.5)).unwrap();
+        db.insert_request(&row("dev", 0.25)).unwrap();
+        db.insert_request(&row("car", 0.1)).unwrap();
+        let since = Utc::now() - chrono::Duration::hours(1);
+        assert!((db.spent_since("dev", since).unwrap() - 0.75).abs() < 1e-9);
+        assert!((db.spent_since("car", since).unwrap() - 0.1).abs() < 1e-9);
+        assert_eq!(
+            db.spent_since("dev", Utc::now() + chrono::Duration::hours(1))
+                .unwrap(),
+            0.0
+        );
+        let agg = db.daily_requests(1).unwrap();
+        let dev = agg.iter().find(|a| a.profile == "dev").unwrap();
+        assert_eq!(
+            (
+                dev.requests,
+                dev.errors,
+                dev.input_tokens,
+                dev.output_tokens
+            ),
+            (2, 0, 20, 10)
+        );
+        assert!((dev.cost_usd - 0.75).abs() < 1e-9);
+        assert_eq!(dev.avg_latency_ms, Some(100.0));
     }
 
     #[test]

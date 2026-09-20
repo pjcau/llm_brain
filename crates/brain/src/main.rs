@@ -1,16 +1,20 @@
 //! `brain` — llm_brain CLI. Phase 0 surface:
-//!   brain keys provision|list      OpenRouter keys, one per profile, daily limits
+//!   brain upstream provision|list  OpenRouter keys, one per profile, daily limits
+//!   brain keys create|list|revoke  client keys (Phase 1): brain_<profile>_…
 //!   brain usage snapshot|report    spend per profile from GET /key, stored in SQLite
 //!   brain setup claude-code|aider  client configuration for a profile
 //!   brain bench run|report         the real-bug suite
 
+mod auth;
 mod bench;
+mod budget;
 mod config;
 mod dashboard;
 mod db;
 mod events;
 mod keys;
 mod openrouter;
+mod proxy;
 mod setup;
 mod usage;
 
@@ -37,7 +41,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// OpenRouter keys per profile
+    /// OpenRouter (upstream) keys per profile
+    Upstream {
+        #[command(subcommand)]
+        cmd: UpstreamCmd,
+    },
+    /// Client keys for the proxy (brain_<profile>_…)
     Keys {
         #[command(subcommand)]
         cmd: KeysCmd,
@@ -76,7 +85,37 @@ enum Cmd {
 
 #[derive(Subcommand)]
 enum KeysCmd {
-    /// Create one key per profile with its daily limit (needs OPENROUTER_MANAGEMENT_KEY)
+    /// Issue a client key bound to a profile; printed once, stored hashed
+    Create {
+        #[arg(long)]
+        profile: String,
+        /// Who holds it: prod, staging, laptop…
+        #[arg(long)]
+        name: String,
+        /// YYYY-MM-DD or RFC 3339
+        #[arg(long)]
+        expires: Option<String>,
+        /// Comma-separated IPs/CIDRs allowed to use it
+        #[arg(long)]
+        ip: Option<String>,
+    },
+    /// Client keys (prefix only, never the secret)
+    List {
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Revoke the active key `profile`/`name`
+    Revoke {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum UpstreamCmd {
+    /// Create one OpenRouter key per profile with its daily limit (needs OPENROUTER_MANAGEMENT_KEY)
     Provision {
         /// Recreate keys even for profiles that already have one in the env
         #[arg(long)]
@@ -85,7 +124,7 @@ enum KeysCmd {
         #[arg(long, value_delimiter = ',')]
         only: Option<Vec<String>>,
     },
-    /// List keys of the account (needs OPENROUTER_MANAGEMENT_KEY)
+    /// List OpenRouter keys of the account (needs OPENROUTER_MANAGEMENT_KEY)
     List,
 }
 
@@ -194,12 +233,12 @@ async fn main() -> Result<()> {
     );
 
     match cli.cmd {
-        Cmd::Keys { cmd } => {
+        Cmd::Upstream { cmd } => {
             let mgmt = env.get("OPENROUTER_MANAGEMENT_KEY").filter(|k| !k.is_empty()).context(
                 "OPENROUTER_MANAGEMENT_KEY is not set (create a management key on openrouter.ai, put it in .env for this command only)",
             )?;
             match cmd {
-                KeysCmd::Provision { force, only } => {
+                UpstreamCmd::Provision { force, only } => {
                     let (created, skipped) =
                         keys::provision(&cfg, &env, &client, mgmt, force, only.as_deref()).await?;
                     if !skipped.is_empty() {
@@ -221,9 +260,85 @@ async fn main() -> Result<()> {
                         eprintln!("# then remove OPENROUTER_MANAGEMENT_KEY from .env");
                     }
                 }
-                KeysCmd::List => {
+                UpstreamCmd::List => {
                     let list = client.list_keys(mgmt).await?;
                     print!("{}", keys::render_list(&list));
+                }
+            }
+        }
+        Cmd::Keys { cmd } => {
+            let db = db::Db::open(&db_path)?;
+            match cmd {
+                KeysCmd::Create {
+                    profile,
+                    name,
+                    expires,
+                    ip,
+                } => {
+                    cfg.profile(&profile)?;
+                    let secret = auth::generate(&profile);
+                    let key = auth::ApiKey {
+                        id: 0,
+                        key_hash: auth::hash(&secret),
+                        prefix: auth::display_prefix(&secret),
+                        profile: profile.clone(),
+                        name: name.clone(),
+                        ip_allow: ip.unwrap_or_default(),
+                        created_at: chrono::Utc::now(),
+                        expires_at: expires.as_deref().map(auth::parse_expiry).transpose()?,
+                        last_used_at: None,
+                        revoked_at: None,
+                    };
+                    db.insert_api_key(&key).with_context(|| {
+                        format!("an active key named `{name}` already exists for `{profile}`")
+                    })?;
+                    eprintln!(
+                        "# client key for profile `{profile}` ({name}). Shown once, stored hashed. Give it to that app only."
+                    );
+                    println!("{secret}");
+                }
+                KeysCmd::List { profile } => {
+                    println!(
+                        "{:<22} {:<10} {:<12} {:<17} {:<17} {:<17} state",
+                        "prefix", "profile", "name", "created", "expires", "last used"
+                    );
+                    for k in db.api_keys(profile.as_deref())? {
+                        let f = |d: Option<chrono::DateTime<chrono::Utc>>| {
+                            d.map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                                .unwrap_or_else(|| "-".into())
+                        };
+                        let state = if k.revoked_at.is_some() {
+                            "revoked"
+                        } else if k.expires_at.is_some_and(|e| e <= chrono::Utc::now()) {
+                            "expired"
+                        } else {
+                            "active"
+                        };
+                        let ip = if k.ip_allow.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ip={}", k.ip_allow)
+                        };
+                        println!(
+                            "{:<22} {:<10} {:<12} {:<17} {:<17} {:<17} {state}{ip}",
+                            k.prefix,
+                            k.profile,
+                            k.name,
+                            f(Some(k.created_at)),
+                            f(k.expires_at),
+                            f(k.last_used_at)
+                        );
+                    }
+                }
+                KeysCmd::Revoke { profile, name } => {
+                    if db.revoke_api_key(&profile, &name)? {
+                        db.insert_audit("cli", &format!("{profile}/{name}"), "revoked")?;
+                        println!(
+                            "revoked {profile}/{name} (the proxy forgets cached keys within 60 s)"
+                        );
+                    } else {
+                        bail!("no active key `{name}` for profile `{profile}`");
+                    }
                 }
             }
         }
@@ -243,7 +358,7 @@ async fn main() -> Result<()> {
                     }
                     if !missing.is_empty() {
                         eprintln!(
-                            "no key in env for: {} (run `brain keys provision`)",
+                            "no key in env for: {} (run `brain upstream provision`)",
                             missing.join(", ")
                         );
                     }
@@ -322,11 +437,25 @@ async fn main() -> Result<()> {
                     tokio::time::sleep(std::time::Duration::from_secs(refresh.max(30))).await;
                 }
             });
+            let proxy_state = proxy::ProxyState::new(
+                std::sync::Arc::new(cfg.clone()),
+                db_path.clone(),
+                cli.openrouter_base.clone(),
+                &env,
+                proxy::Limits::default(),
+            );
+            let app = proxy::router(proxy_state).merge(dashboard::router(state));
             let listener = tokio::net::TcpListener::bind(&bind)
                 .await
                 .with_context(|| format!("binding {bind}"))?;
-            eprintln!("llm_brain board on http://{bind}/  (refresh every {refresh}s)");
-            axum::serve(listener, dashboard::router(state)).await?;
+            eprintln!(
+                "llm_brain proxy + board on http://{bind}/  (refresh every {refresh}s; /v1/* needs a client key)"
+            );
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await?;
         }
         Cmd::Events { cmd } => {
             let db = db::Db::open(&db_path)?;
