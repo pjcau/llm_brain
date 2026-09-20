@@ -434,10 +434,9 @@ async fn main() -> Result<()> {
             SetupCmd::Aider { proxy: true, .. } => {
                 let data = setup::data_dir();
                 print!(
-                    "{}
-# {data}/aider-conventions.md
-{}",
+                    "{}\n# {data}/aider-model-settings.yml\n{}\n# {data}/aider-conventions.md\n{}",
                     setup::aider_proxy(&cfg)?,
+                    setup::aider_model_settings(&cfg),
                     setup::AIDER_CONVENTIONS
                 );
             }
