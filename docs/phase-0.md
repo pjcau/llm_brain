@@ -52,13 +52,10 @@ aider is not installed on the host; the image built for the container test
 works as the runtime. `brain setup aider --docker llm-brain-aider-test:latest`
 prints a shell function; paste it into `~/.bashrc` together with the keys:
 
-```bash
-set -a; . ~/Documents/myProjects/llm_brain/.env; set +a     # OPENROUTER_KEY_* in the shell
-or-aider() { … }                                             # from `brain setup aider --docker …`
-or-claude() { ANTHROPIC_BASE_URL=https://openrouter.ai/api ANTHROPIC_AUTH_TOKEN="$OPENROUTER_KEY_DEV" \
-  ANTHROPIC_MODEL=prism-ml/ternary-bonsai-2-27b ANTHROPIC_DEFAULT_HAIKU_MODEL=prism-ml/ternary-bonsai-2-27b \
-  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 claude "$@"; }
-```
+The full functions (`or-aider`, `or-claude`), the `.env` variable names,
+the YAML files and the cron line are in the
+[Configuration reference](./configuration.md) — variable names only, no
+secrets.
 
 Then, inside any git repo: `or-aider` (architect = reasoning tier, editor =
 fast tier, `/model` to switch) or `or-claude`. Plain `claude` and a plain
