@@ -32,3 +32,7 @@ yarn-error.log*
 /bench/.runs
 .aider*
 /data
+
+# local-only deployment details (server IP, access notes): never committed
+*.local.env
+*.local.md

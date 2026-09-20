@@ -27,7 +27,8 @@ Hetzner Cloud → new project → server:
 Optional: create a Hetzner **Object Storage** bucket (`llm-brain-backup`) and
 an S3 key pair for Litestream. Backblaze B2 works the same.
 
-Then send the IP. No domain is needed: the hostname is
+Put the IP, plan and hostname in `deploy/server.local.env` (git-ignored,
+never committed; template created on first setup). No domain is needed: the hostname is
 `brain.<ip-with-dashes>.sslip.io` until you want a real one
 ([hostname vs domain](./analysis/hosting-costs.md#hetzner-cax11-or-lightsail-5-and-is-a-domain-needed)).
 
