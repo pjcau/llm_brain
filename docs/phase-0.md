@@ -110,6 +110,29 @@ At the end of the week: `brain usage report`, `brain events report --days 7`,
 5. **No integration into agent-orchestrator** until the local setup has run
    for the week: it stays a read-only source of benchmark tasks.
 
+## First benchmark rows (2026-09-20, task `ago-0001`)
+
+| Tool | Model | Result | Time | Cost (key delta) |
+|------|-------|--------|------|------------------|
+| Claude Code (host) | bonsai-2-27b | FAIL — `429 Provider returned error`, 12 min of retries | 746 s | ~0.006 $ * |
+| aider (Docker) | bonsai-2-27b | FAIL | 831 s | ~0.008 $ * |
+| **aider (Docker)** | **deepseek-v4-flash** | **PASS** — the fix's test passes | **260 s** | **0.004 $** |
+| Claude Code (host) | deepseek-v4-flash | FAIL — one correct `Read`, then an empty reply; Claude Code stops | 16 s | ~0.000 $ |
+
+\* the two bonsai runs overlapped on the same key, so their costs are mixed.
+
+What the rows say, with the [direct probes](./models/bonsai-2-27b.md#measured-on-2026-09-20):
+bonsai's single provider is 6× slower than deepseek-v4-flash, has no prompt
+cache and rejects Claude Code's parallel requests; deepseek-v4-flash is
+cheaper ($0.04/$0.08), has reasoning and tools, and solved the task with
+aider. Claude Code on a non-Claude model fails for a different reason:
+the model answers nothing after a tool result — the tool-loop reliability
+risk from [Claude Code and aider](./architecture/claude-code-aider.md).
+
+**Proposed decision (yours)**: move the `fast` tier to
+`deepseek/deepseek-v4-flash`, keep bonsai as a candidate for the nightly
+benchmark rather than the daily driver. One line in `config/tiers.yaml`.
+
 ## Exit criteria (from the roadmap)
 
 - No daily limit ever hit: `usage report` never shows `EXHAUSTED`.

@@ -10,6 +10,7 @@ https://pjcau.github.io/llm_brain/ — read `docs/index.md` first, then
 
 - **All code is Rust** (Cargo workspace; `tools/` for helpers, `crates/brain` for the service). No Python, no shell scripts beyond `deploy/`.
 - Every design iteration is recorded: add a row to `docs/changelog.md`, update or add the page, keep `docs/index.md` under 2000 words.
+- Site build must pass before pushing: run `npm run build` and check its exit code (not a grep on its output).
 - Diagrams: edit `diagrams/*.mmd` only, then `npm run sync-diagrams` (it runs `cargo run -p sync-diagrams`).
 - Code and tests go together: every module has unit tests; HTTP is mocked with `wiremock`; anything that needs a real tool runs in Docker via `testcontainers` (feature `docker-tests`, see `crates/brain/tests/`). CI runs fmt, clippy `-D warnings`, tests and the docker tests.
 - Never commit secrets: config references env var names, `.env` is ignored.

@@ -74,6 +74,34 @@ pub fn aider(cfg: &Config, profile: &str) -> Result<(String, String)> {
     ))
 }
 
+/// Shell function that runs Claude Code from a Docker image: current repo
+/// mounted, a persistent HOME under `BRAIN_DATA/claude-home` so sessions,
+/// settings and trust survive (and `brain events ingest` reads them), same
+/// variables as [`claude_code`].
+pub fn claude_code_docker(cfg: &Config, profile: &str, image: &str) -> Result<String> {
+    let p = cfg.profile(profile)?;
+    let fast = cfg.model_for_tier("fast")?;
+    let reasoning = cfg
+        .model_for_tier("reasoning")
+        .unwrap_or("<no reasoning tier>");
+    let key_env = p.key_env();
+    let data = data_dir();
+    Ok(format!(
+        "# Claude Code from Docker → OpenRouter (profile `{profile}`). Paste into ~/.bashrc, then run `or-claude` inside a git repo.\n\
+         # Sessions land in {data}/claude-home/.claude/projects (ingested by `brain events ingest`).\n\
+         or-claude() {{\n\
+           mkdir -p {data}/claude-home\n\
+           docker run --rm -it --user \"$(id -u):$(id -g)\" -e HOME={data}/claude-home \\\n\
+             -v \"$PWD:$PWD\" -w \"$PWD\" -v \"{data}/claude-home:{data}/claude-home\" \\\n\
+             -e ANTHROPIC_BASE_URL={OPENROUTER_ANTHROPIC_BASE} -e ANTHROPIC_AUTH_TOKEN=\"${key_env}\" \\\n\
+             -e ANTHROPIC_MODEL={fast} -e ANTHROPIC_DEFAULT_HAIKU_MODEL={fast} \\\n\
+             -e CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 -e CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 \\\n\
+             {image} claude \"$@\"\n\
+         }}\n\
+         # switch tier in-session: /model {reasoning}\n",
+    ))
+}
+
 /// Shell function that runs aider from the Docker image with the current
 /// repo mounted, for machines where aider is not installed. Same model
 /// split and log files as [`aider`], so `brain events ingest` sees it.
@@ -120,6 +148,34 @@ mod tests {
         assert!(out.contains("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1"));
         assert!(out.contains("/model deepseek/deepseek-v4-pro"));
         assert!(claude_code(&cfg(), "nope").is_err());
+    }
+
+    #[test]
+    fn claude_docker_function_mounts_repo_and_persistent_home() {
+        let out = claude_code_docker(&cfg(), "dev", "llm-brain-claude-test:latest").unwrap();
+        assert!(out.contains("or-claude() {"));
+        assert!(
+            out.contains("-e HOME=$HOME/.local/share/llm_brain/claude-home"),
+            "{out}"
+        );
+        assert!(out.contains("-v \"$PWD:$PWD\" -w \"$PWD\""), "{out}");
+        assert!(
+            out.contains("-e ANTHROPIC_AUTH_TOKEN=\"$OPENROUTER_KEY_DEV\""),
+            "{out}"
+        );
+        assert!(
+            out.contains("-e ANTHROPIC_MODEL=prism-ml/ternary-bonsai-2-27b"),
+            "{out}"
+        );
+        assert!(
+            out.contains("-e CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1"),
+            "{out}"
+        );
+        assert!(
+            out.contains("llm-brain-claude-test:latest claude \"$@\""),
+            "{out}"
+        );
+        assert!(claude_code_docker(&cfg(), "nope", "x").is_err());
     }
 
     #[test]

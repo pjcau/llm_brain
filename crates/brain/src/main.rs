@@ -95,6 +95,9 @@ enum SetupCmd {
     ClaudeCode {
         #[arg(long, default_value = "dev")]
         profile: String,
+        /// Print a shell function that runs Claude Code from this Docker image instead
+        #[arg(long, value_name = "IMAGE")]
+        docker: Option<String>,
     },
     /// Env block + .aider.model.metadata.json for aider
     Aider {
@@ -234,7 +237,16 @@ async fn main() -> Result<()> {
             }
         }
         Cmd::Setup { cmd } => match cmd {
-            SetupCmd::ClaudeCode { profile } => print!("{}", setup::claude_code(&cfg, &profile)?),
+            SetupCmd::ClaudeCode {
+                profile,
+                docker: Some(image),
+            } => {
+                print!("{}", setup::claude_code_docker(&cfg, &profile, &image)?)
+            }
+            SetupCmd::ClaudeCode {
+                profile,
+                docker: None,
+            } => print!("{}", setup::claude_code(&cfg, &profile)?),
             SetupCmd::Aider {
                 profile,
                 docker: Some(image),
@@ -278,8 +290,13 @@ async fn main() -> Result<()> {
                         );
                     }
                     let mut sessions = Vec::new();
-                    if claude_projects.is_dir() {
-                        for project in std::fs::read_dir(&claude_projects)?.flatten() {
+                    let docker_projects =
+                        PathBuf::from(format!("{data}/claude-home/.claude/projects"));
+                    for root in [&claude_projects, &docker_projects] {
+                        if !root.is_dir() {
+                            continue;
+                        }
+                        for project in std::fs::read_dir(root)?.flatten() {
                             if let Ok(files) = std::fs::read_dir(project.path()) {
                                 sessions.extend(
                                     files
