@@ -216,8 +216,10 @@ docker compose -f deploy/docker-compose.board.yml down
 ```
 
 One container (`llm-brain-board`, image built from `docker/brain.Dockerfile`)
-runs `brain serve`: the page on `/` (budget per profile, anomalies,
-requests per day × tool × model, benchmark runs; reloads every 60 s),
+runs `brain serve`: the page on `/` (budget cards per profile, sessions
+per profile × end user, proxy traffic per day × profile × model, live feed
+of the last requests, anomalies, tool logs, benchmark runs; phone-friendly;
+reloads every 30 s),
 JSON on `/api/summary`, `/health`. Every 10 minutes it takes the usage
 snapshots and ingests the tools' logs itself, so no cron is needed while
 it runs. Mounts: `config/` and `data/` (the shared SQLite) from the repo,
