@@ -1,0 +1,13 @@
+# /etc/litestream.yml — continuous replication of the SQLite file.
+# Fill the bucket + credentials via the environment file used by the
+# litestream service (/etc/default/litestream): LITESTREAM_ACCESS_KEY_ID,
+# LITESTREAM_SECRET_ACCESS_KEY. Hetzner Object Storage or Backblaze B2.
+dbs:
+  - path: /opt/llm_brain/data/brain.db
+    replicas:
+      - type: s3
+        bucket: llm-brain-backup
+        path: brain.db
+        endpoint: https://fsn1.your-objectstorage.com   # Hetzner Object Storage (Falkenstein); B2: https://s3.<region>.backblazeb2.com
+        region: fsn1
+        retention: 720h

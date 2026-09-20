@@ -1,5 +1,6 @@
-# systemd unit for the VPS. Secrets via LoadCredential or an EnvironmentFile
-# with mode 0600; the binary listens on 127.0.0.1 only, Caddy fronts it.
+# /etc/systemd/system/brain.service — the board today, the proxy in Phase 1.
+# Secrets from /opt/llm_brain/.env (mode 0600, owner brain). Binds to
+# localhost only; Caddy terminates TLS in front.
 [Unit]
 Description=llm_brain
 After=network-online.target
@@ -10,13 +11,16 @@ User=brain
 Group=brain
 WorkingDirectory=/opt/llm_brain
 EnvironmentFile=/opt/llm_brain/.env
-ExecStart=/opt/llm_brain/brain serve
+Environment=BRAIN_HOME=/opt/llm_brain
+Environment=BRAIN_DB=/opt/llm_brain/data/brain.db
+ExecStart=/opt/llm_brain/brain serve --bind 127.0.0.1:8080 --refresh 600
 Restart=on-failure
-RestartSec=2
+RestartSec=3
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/opt/llm_brain/data
+ProtectHome=true
 PrivateTmp=true
+ReadWritePaths=/opt/llm_brain/data
 
 [Install]
 WantedBy=multi-user.target

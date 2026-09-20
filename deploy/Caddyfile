@@ -1,13 +1,9 @@
-# Replace the host with your subdomain (or brain.<ip>.sslip.io in Phase 0/1).
-brain.example.com {
+# /etc/caddy/Caddyfile — replace the host with your subdomain, or use the
+# sslip.io form (brain.<ip-with-dashes>.sslip.io) without owning a domain.
+# The board and, later, the proxy: /health, /api/*, /v1/* and / go to brain.
+brain.1-2-3-4.sslip.io {
     encode zstd gzip
-    @api path /v1/* /health
-    handle @api {
-        reverse_proxy 127.0.0.1:8080 {
-            flush_interval -1   # SSE: never buffer
-        }
-    }
-    handle {
-        respond 404
+    reverse_proxy 127.0.0.1:8080 {
+        flush_interval -1   # SSE: never buffer (needed by the Phase 1 proxy)
     }
 }

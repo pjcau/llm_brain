@@ -1,0 +1,49 @@
+name: Release binaries
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-gnu   # Hetzner CAX (Ampere ARM)
+          - target: x86_64-unknown-linux-gnu    # CX / Lightsail x86
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cross
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cross build --release -p brain --target ${{ matrix.target }}
+      - run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/brain dist/brain-${{ matrix.target }}
+          sha256sum dist/brain-${{ matrix.target }} > dist/brain-${{ matrix.target }}.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: brain-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
