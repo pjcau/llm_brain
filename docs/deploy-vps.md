@@ -3,7 +3,7 @@ title: VPS deployment
 sidebar_position: 5
 ---
 
-# VPS deployment (Hetzner)
+# VPS deployment
 
 What runs on the VPS today: the `brain` binary with the **board** (budget
 per profile from OpenRouter's counters, benchmark rows). The tools' logs
@@ -11,9 +11,19 @@ per profile from OpenRouter's counters, benchmark rows). The tools' logs
 moves every request through the VPS. The infrastructure below — Caddy/TLS,
 systemd, Litestream, the release pipeline — is the same the proxy will use.
 
+:::note Deployed on 2026-09-20
+Provider actually chosen: **Contabo** (x86_64, 4 vCPU, 8 GB, Ubuntu 24.04.5).
+Contabo has no cloud-init in the order flow, so the steps of
+`deploy/cloud-init.yaml` were run over SSH; one Contabo-specific detail:
+`/etc/ssh/sshd_config.d/50-cloud-init.conf` sets `PasswordAuthentication yes`
+and wins over later files, so the hardening file must sort first
+(`00-hardening.conf`). The board is live at `https://brain.<ip-with-dashes>.sslip.io/`
+(IP and access notes in the git-ignored `deploy/server.local.env`).
+:::
+
 ## 1. Create the server (you)
 
-Hetzner Cloud → new project → server:
+Hetzner Cloud → new project → server (or any provider with Ubuntu 24.04):
 
 | Setting | Value |
 |---------|-------|
@@ -43,7 +53,7 @@ for x86, with `.sha256` files. On the server:
 cd /opt/llm_brain
 curl -fsSLO https://github.com/pjcau/llm_brain/releases/latest/download/brain-aarch64-unknown-linux-gnu
 curl -fsSLO https://github.com/pjcau/llm_brain/releases/latest/download/brain-aarch64-unknown-linux-gnu.sha256
-sha256sum -c brain-aarch64-unknown-linux-gnu.sha256 && install -m 0755 brain-aarch64-unknown-linux-gnu brain
+sha256sum -c brain-aarch64-unknown-linux-gnu.sha256 && install -m 0755 brain-aarch64-unknown-linux-gnu brain   # x86: the x86_64 files
 git clone --depth 1 https://github.com/pjcau/llm_brain /tmp/src && cp -r /tmp/src/config /opt/llm_brain/
 ```
 
