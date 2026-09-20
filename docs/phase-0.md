@@ -132,7 +132,17 @@ At the end of the week: `brain usage report`, `brain events report --days 7`,
 | **aider (Docker)** | **deepseek-v4-flash** | **PASS** — the fix's test passes | **260 s** | **0.004 $** |
 | Claude Code (host) | deepseek-v4-flash | FAIL — one correct `Read`, then an empty reply; Claude Code stops | 16 s | ~0.000 $ |
 
+| aider (Docker) | bonsai alone, `whole`, 30-min timeout | FAIL — provider rate limits in series, whole-file rewrites | 900 s | 0.013 $ |
+| aider (Docker) | architect bonsai + editor deepseek-v4-flash, `whole`, fallback on | FAIL — no rate limits any more, but the editor's whole-file edit was not applied (101k tokens in one turn) | 400 s | 0.003 $ |
+| **aider (Docker)** | **deepseek-v4-flash, `diff`** | **PASS** | **39 s** | < 0.001 $ |
+| **aider (Docker)** | **architect bonsai + editor deepseek-v4-flash, `diff`, fallback on** | **PASS** — bonsai proposes, deepseek applies | **74 s** | < 0.001 $ |
+
 \* the two bonsai runs overlapped on the same key, so their costs are mixed.
+
+Same task, from 260 s / 30k→8.7k tokens (`whole`) to 39 s / 12k→676
+tokens (`diff`): the edit format was worth more than the model choice.
+**bonsai works as the reasoning tier** in the architect/editor split with
+the OpenRouter fallback — the configuration `brain setup aider` generates.
 
 What the rows say, with the [direct probes](./models/bonsai-2-27b.md#measured-on-2026-09-20):
 bonsai's single provider is 6× slower than deepseek-v4-flash, has no prompt

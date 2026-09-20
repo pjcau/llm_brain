@@ -45,6 +45,9 @@ in 1.4 s each — the single provider degrades under size/load. Mitigation
 in place: OpenRouter `models[]` fallback to deepseek-v4-pro
 ([configuration](../configuration.md#aider-model-fallbacks-openrouter-models)).
 
+Confirmed by benchmark (2026-09-20): architect bonsai + editor
+deepseek-v4-flash in `diff` format, fallback on → `ago-0001` **PASS in 74 s**.
+
 Verdict (decided 2026-09-20): **bonsai is the `reasoning` tier**, not the
 `fast` one. Its strengths (reasoning, 262K context, open weights) fit the
 architect role; its weaknesses (one slow provider, no prompt cache) are
