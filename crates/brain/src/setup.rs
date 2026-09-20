@@ -98,8 +98,17 @@ pub fn aider_model_settings(cfg: &Config) -> String {
             .map(|m| format!("\"{m}\""))
             .collect::<Vec<_>>()
             .join(", ");
+        // aider assigns `whole` to models it doesn't know: whole-file rewrites,
+        // expensive and fragile on big files. The fast tier is the editor and
+        // gets the diff formats (what aider itself uses for DeepSeek); the
+        // reasoning tier keeps aider's default as architect.
+        let formats = if tier == "fast" {
+            "  edit_format: diff\n  editor_edit_format: editor-diff\n  use_repo_map: true\n"
+        } else {
+            "  use_repo_map: true\n"
+        };
         out.push_str(&format!(
-            "- name: openai/{model}\n  extra_params:\n    extra_body:\n      models: [{list}]\n"
+            "- name: openai/{model}\n{formats}  extra_params:\n    extra_body:\n      models: [{list}]\n"
         ));
     }
     out
@@ -228,6 +237,12 @@ mod tests {
         );
         assert!(
             y.contains("models: [\"deepseek/deepseek-v4-flash\", \"qwen/qwen3.7-flash\"]"),
+            "{y}"
+        );
+        // fast tier = editor → diff formats; reasoning tier keeps aider's default
+        assert!(y.contains("- name: openai/deepseek/deepseek-v4-flash\n  edit_format: diff\n  editor_edit_format: editor-diff\n"), "{y}");
+        assert!(
+            !y.contains("- name: openai/prism-ml/ternary-bonsai-2-27b\n  edit_format"),
             "{y}"
         );
         assert!(

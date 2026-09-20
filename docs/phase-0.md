@@ -70,6 +70,15 @@ The metadata JSON from `brain setup aider` lives at
 `~/.local/share/llm_brain/aider-model-metadata.json`, so aider shows real
 costs for the tier models.
 
+## The board
+
+`docker compose -f deploy/docker-compose.board.yml up -d --build` →
+**http://127.0.0.1:8090/**: budget per profile with the degradation
+states, anomalies (OpenRouter traffic only), requests per day × tool ×
+model with errors/retries/tokens/cache/latency, benchmark runs. It
+snapshots and ingests on its own every 10 minutes
+([details](./configuration.md#the-board-brain-serve-in-docker)).
+
 ## What brain watches while you work
 
 No proxy yet, so the layer reads what the tools leave on disk:

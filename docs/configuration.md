@@ -182,7 +182,29 @@ If aider is installed on the host instead of Docker, the equivalent is
 subscription). Use the function while measuring, the settings file when
 you switch for good.
 
-## aider model fallbacks (OpenRouter `models[]`)
+## The board (`brain serve`, in Docker)
+
+```bash
+docker compose -f deploy/docker-compose.board.yml up -d --build   # → http://127.0.0.1:8090/
+docker compose -f deploy/docker-compose.board.yml down
+```
+
+One container (`llm-brain-board`, image built from `docker/brain.Dockerfile`)
+runs `brain serve`: the page on `/` (budget per profile, anomalies,
+requests per day × tool × model, benchmark runs; reloads every 60 s),
+JSON on `/api/summary`, `/health`. Every 10 minutes it takes the usage
+snapshots and ingests the tools' logs itself, so no cron is needed while
+it runs. Mounts: `config/` and `data/` (the shared SQLite) from the repo,
+`~/.local/share/llm_brain` and `~/.claude/projects` read-only; keys come
+from `.env` via `env_file`. Bound to `127.0.0.1` only.
+
+Docker engine: on Linux the native engine; on macOS **OrbStack** works
+unchanged (it exposes the standard Docker socket and `docker compose`).
+
+Without Docker: `brain serve --bind 127.0.0.1:8080` does the same from the
+host binary.
+
+## aider model fallbacks and edit formats (`.aider.model.settings.yml`)
 
 bonsai has a single provider; when it returns an error, aider would only
 retry. `brain setup aider` also prints `.aider.model.settings.yml`, saved
@@ -190,17 +212,25 @@ at `~/.local/share/llm_brain/aider-model-settings.yml` and passed with
 `--model-settings-file`: per model, `extra_params.extra_body.models` lists
 the tier's primary and fallback, and OpenRouter switches on provider
 errors, rate limits or downtime, billing the model actually used (verified
-on the wire on 2026-09-20).
+on the wire on 2026-09-20). The same file sets the **edit format**: aider
+assigns `whole` (full-file rewrites) to models it doesn't know, which on a
+large file meant 101k tokens in one turn and a failed edit; the fast tier,
+being the editor, gets `diff` / `editor-diff` as aider itself uses for
+DeepSeek.
 
 ```yaml
-- name: openai/prism-ml/ternary-bonsai-2-27b
-  extra_params:
-    extra_body:
-      models: ["prism-ml/ternary-bonsai-2-27b", "deepseek/deepseek-v4-pro"]
 - name: openai/deepseek/deepseek-v4-flash
+  edit_format: diff
+  editor_edit_format: editor-diff
+  use_repo_map: true
   extra_params:
     extra_body:
       models: ["deepseek/deepseek-v4-flash", "qwen/qwen3.7-flash"]
+- name: openai/prism-ml/ternary-bonsai-2-27b
+  use_repo_map: true
+  extra_params:
+    extra_body:
+      models: ["prism-ml/ternary-bonsai-2-27b", "deepseek/deepseek-v4-pro"]
 ```
 
 Claude Code cannot get the equivalent (`fallbacks` on the Anthropic
@@ -254,7 +284,8 @@ and by the container test in CI.
 | `brain setup aider [--profile dev] [--docker IMAGE]` | — |
 | `brain events ingest [--aider-chat FILE] [--claude-projects DIR]` | the tools' logs |
 | `brain events report [--days 7]` | — |
-| `brain bench run --tool aider\|claude [--tier fast] [--docker IMAGE] [--only id]` | `OPENROUTER_KEY_BENCHMARK` |
+| `brain bench run --tool aider\|claude [--tier fast\|reasoning] [--docker IMAGE] [--only id]` — `--tier reasoning` runs aider in architect mode with the fast tier as editor; the settings file is passed if present | `OPENROUTER_KEY_BENCHMARK` |
+| `brain serve [--bind 127.0.0.1:8080] [--refresh 600] [--days 7]` | `OPENROUTER_KEY_*` for snapshots |
 | `brain bench report [--run ID]` | — |
 
 Global flags: `--config DIR`, `--db FILE`. Env: `BRAIN_HOME`, `BRAIN_DB`, `BRAIN_DATA`.
