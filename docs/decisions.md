@@ -30,6 +30,7 @@ title: Decisions
 | 2026-09-19 | [claude-kit](https://github.com/pjcau/claude-kit) added as a git submodule (`.claude-kit/`) for the skills, agents and hooks used in the dev workflow. | [Stack](./analysis/stack.md) |
 
 | 2026-09-20 | **Daily agent = Claude Code through the proxy (`px-claude`)** on the `agent` tier (deepseek-v4-pro); **aider = cheap editor** for targeted changes, not a Claude Code replacement (no tools, synchronous chat). OpenCode to be benchmarked as the open-source agent alternative. | [Phase 1](./phase-1.md) |
+| 2026-09-22 | **`brain/auto`: tier chosen once per session by a decision model (Jev via OpenRouter), never per turn.** Ladder `fast → medium (glm-5.3-flash) → agent → max (glm-5.3)`; fallback `agent`; `px-claude` defaults to it. `openrouter/auto` rejected (its ranking, coarse cost tiers, blind to our budgets); Laya kept as the local alternative. | [Auto routing](./architecture/auto-routing.md) |
 
 ## Open
 

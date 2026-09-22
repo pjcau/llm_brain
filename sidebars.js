@@ -14,7 +14,7 @@ const sidebars = {
     },
     {
       type: 'category', label: 'Architecture', collapsed: false,
-      items: ['architecture/budget', 'architecture/secrets', 'architecture/auth-topology', 'architecture/auth-flow', 'architecture/client-compatibility', 'architecture/benchmark', 'architecture/api-layer', 'architecture/cache', 'architecture/cache-logic', 'architecture/claude-code-aider', 'architecture/apps', 'architecture/gpu'],
+      items: ['architecture/budget', 'architecture/secrets', 'architecture/auth-topology', 'architecture/auth-flow', 'architecture/client-compatibility', 'architecture/benchmark', 'architecture/api-layer', 'architecture/auto-routing', 'architecture/cache', 'architecture/cache-logic', 'architecture/claude-code-aider', 'architecture/apps', 'architecture/gpu'],
     },
     {
       type: 'category', label: 'Models', collapsed: false,

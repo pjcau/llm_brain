@@ -21,6 +21,13 @@ tiers:
     input_usd_per_m: 0.075
     output_usd_per_m: 0.5
     max_output_tokens: 32768
+  medium:                             # rung between fast and agent (2026-09-22): 32 providers, ~1/4 of agent per task
+    model: z-ai/glm-5.3-flash           # $0.15 / $0.50 per M
+    fallback: deepseek/deepseek-v4-flash
+    context: 1310720
+    input_usd_per_m: 0.15
+    output_usd_per_m: 0.50
+    max_output_tokens: 32768
   agent:                              # Claude Code's main model through the proxy: reliable tool loop
     model: deepseek/deepseek-v4-pro     # $0.96 / $1.91 per M, 1M context, 16 providers (Auto Exacto sorts them on tool calls)
     fallback: qwen/qwen3.7-plus
@@ -28,9 +35,36 @@ tiers:
     input_usd_per_m: 0.96
     output_usd_per_m: 1.91
     max_output_tokens: 32768
+  max:                                # top rung, not yet measured against agent (2026-09-22)
+    model: z-ai/glm-5.3                 # $0.84 / $2.64 per M, 34 providers
+    fallback: deepseek/deepseek-v4-pro
+    context: 1310720
+    input_usd_per_m: 0.84
+    output_usd_per_m: 2.64
+    max_output_tokens: 32768
   premium:
     model: null
     fallback: null
     context: 0
     input_usd_per_m: 0
     output_usd_per_m: 0
+
+# brain/auto: the decision model reads the first user message of a session and
+# picks a rung; the choice sticks to the session (docs/architecture/auto-routing.md).
+# Jev answers in ~0.5 s for ~0.00002 $ through OpenRouter's decisions endpoint,
+# paid by the profile's own key.
+router:
+  model: typesafe/jev-1.13
+  fallback: agent                     # decision model down or unsure → the proven tool-loop tier
+  baseline: agent                     # what px-claude used before: the board shows the saving against it
+  min_confidence: 0.5
+  session_ttl_s: 7200
+  ladder:                             # light → heavy; `when` is what the decision model reads
+    - tier: fast
+      when: a trivial edit in one place with no reasoning needed (typo, rename, a one-line default, a comment), or a question answerable without reading much code
+    - tier: medium
+      when: a focused change in one or two files that needs reading and understanding the surrounding code, or writing a small function or test
+    - tier: agent
+      when: a change across several files, a bug that needs debugging or investigation, running tests and fixing what fails, or any task that needs planning
+    - tier: max
+      when: a large refactor across the codebase, a design or architecture decision, or a subtle bug in concurrency, security or data integrity

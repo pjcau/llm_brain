@@ -26,7 +26,7 @@ flowchart LR
         EP_O["/v1/chat/completions<br/>(OpenAI dialect)"]
         TR["Translator<br/>single internal format<br/>(messages, tools, stream, cache hints)"]
         POL["Policy / Profiles<br/>per client: default tier, budget, cache"]
-        RT["Tier router<br/>fast · reasoning · premium<br/>+ escalation on failure"]
+        RT["Tier router<br/>fast · medium · agent · max<br/>brain/auto: per-session decision (Jev)<br/>+ escalation on failure"]
         CACHE["Cache manager<br/>L1 provider prompt cache<br/>L2 gateway response cache"]
         USG["Usage / Budget<br/>SQLite · daily and monthly limit per profile"]
         PV["providers/<br/>openrouter (today) · openai-compat · local (later)"]
@@ -394,4 +394,33 @@ flowchart LR
         H2["Home: CLI + assistant"] -- "Tailscale or HTTPS" --> B1
     end
     X["Mixed is acceptable: the public endpoint is protected by the auth design;<br/>the extra latency (+5–10 ms) is nothing next to the model"]
+```
+
+## 12. Auto routing (brain/auto)
+
+{/* diagram: 12-auto-routing */}
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CC as Claude Code (px-claude)
+    participant PX as llm_brain proxy
+    participant SC as Session cache (in memory, TTL 2 h)
+    participant JV as Jev (OpenRouter /alpha/decisions)
+    participant OR as OpenRouter /v1
+
+    CC->>PX: POST /v1/messages · model=brain/auto<br/>x-claude-code-session-id: s1 · first user message
+    PX->>SC: get(dev:h:s1)
+    SC-->>PX: miss
+    PX->>JV: state = first user message<br/>question "tier" (choice) · criteria = the ladder's `when`
+    JV-->>PX: choice=medium · confidence 0.95 (~0.5 s, ~0.00002 $)
+    PX->>SC: put(dev:h:s1 → medium)
+    PX->>OR: same request · model = glm-5.3-flash (+ fallback chain)
+    OR-->>CC: stream
+    Note over CC,PX: every later turn of the loop (tool results, retries…)
+    CC->>PX: POST /v1/messages · model=brain/auto · same session id
+    PX->>SC: get(dev:h:s1)
+    SC-->>PX: medium (touch: TTL restarts)
+    PX->>OR: model = glm-5.3-flash — same model, prompt cache warm
+    Note over PX,JV: Jev down, unsure (< min_confidence) or no user text → fallback tier (agent), noted as auto:agent:error / low-confidence / no-task
+    Note over PX: budget rings still apply after the decision: at 70% of the day the rung becomes fast
 ```

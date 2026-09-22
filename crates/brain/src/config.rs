@@ -48,6 +48,44 @@ fn default_max_output() -> u64 {
     16_384
 }
 
+/// One rung of the auto-routing ladder: a tier and the kind of task that
+/// belongs to it, in the words the decision model reads.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Rung {
+    pub tier: String,
+    pub when: String,
+}
+
+/// `brain/auto`: a decision model (Jev through OpenRouter's decisions
+/// endpoint) reads the first user message of a conversation and picks a
+/// rung; the choice sticks to the session so a loop never changes model.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct Router {
+    /// Decision model id, e.g. `typesafe/jev-1.13`.
+    pub model: String,
+    /// Light to heavy.
+    pub ladder: Vec<Rung>,
+    /// Tier used when the decision model fails or answers with low confidence.
+    pub fallback: String,
+    /// Below this confidence the fallback wins over the choice.
+    #[serde(default = "default_min_confidence")]
+    pub min_confidence: f64,
+    /// How long a session keeps its tier after its last request.
+    #[serde(default = "default_session_ttl")]
+    pub session_ttl_s: u64,
+    /// The tier a client would otherwise use, for the board's "saved vs" figure.
+    #[serde(default)]
+    pub baseline: Option<String>,
+}
+
+fn default_min_confidence() -> f64 {
+    0.5
+}
+
+fn default_session_ttl() -> u64 {
+    7200
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct ProfilesFile {
     profiles: Vec<Profile>,
@@ -56,12 +94,15 @@ struct ProfilesFile {
 #[derive(Debug, Clone, Deserialize)]
 struct TiersFile {
     tiers: BTreeMap<String, Tier>,
+    #[serde(default)]
+    router: Option<Router>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub profiles: Vec<Profile>,
     pub tiers: BTreeMap<String, Tier>,
+    pub router: Option<Router>,
 }
 
 impl Config {
@@ -71,6 +112,7 @@ impl Config {
         let cfg = Config {
             profiles: profiles.profiles,
             tiers: tiers.tiers,
+            router: tiers.router,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -83,6 +125,7 @@ impl Config {
         let cfg = Config {
             profiles: p.profiles,
             tiers: t.tiers,
+            router: t.router,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -102,6 +145,33 @@ impl Config {
             }
             if p.daily_limit_usd <= 0.0 {
                 bail!("profile `{}` needs a positive daily_limit_usd", p.name);
+            }
+        }
+        if let Some(r) = &self.router {
+            if r.ladder.len() < 2 {
+                bail!("router.ladder needs at least two rungs");
+            }
+            for rung in &r.ladder {
+                if self.model_for_tier(&rung.tier).is_err() {
+                    bail!(
+                        "router.ladder references tier `{}` without a model",
+                        rung.tier
+                    );
+                }
+                if rung.when.trim().is_empty() {
+                    bail!(
+                        "router.ladder rung `{}` needs a `when` description",
+                        rung.tier
+                    );
+                }
+            }
+            for t in std::iter::once(&r.fallback).chain(r.baseline.iter()) {
+                if self.model_for_tier(t).is_err() {
+                    bail!("router references tier `{t}` without a model");
+                }
+            }
+            if !(0.0..=1.0).contains(&r.min_confidence) {
+                bail!("router.min_confidence must be within 0..=1");
             }
         }
         Ok(())
@@ -229,6 +299,39 @@ tiers:
         assert!(Config::from_yaml(&bad_tier, TIERS).is_err());
         let dup = PROFILES.replace("name: car", "name: dev");
         assert!(Config::from_yaml(&dup, TIERS).is_err());
+    }
+
+    const ROUTER: &str = r#"
+router:
+  model: typesafe/jev-1.13
+  fallback: heavy
+  baseline: heavy
+  ladder:
+    - tier: fast
+      when: trivial edit
+    - tier: heavy
+      when: anything else
+"#;
+
+    #[test]
+    fn router_is_optional_and_validated() {
+        assert!(Config::from_yaml(PROFILES, TIERS).unwrap().router.is_none());
+        let tiers = format!("{TIERS}  heavy:\n    model: deepseek/deepseek-v4-pro\n{ROUTER}");
+        let cfg = Config::from_yaml(PROFILES, &tiers).unwrap();
+        let r = cfg.router.unwrap();
+        assert_eq!(r.ladder.len(), 2);
+        assert_eq!((r.min_confidence, r.session_ttl_s), (0.5, 7200));
+        // a rung on a tier without a model
+        let bad = format!("{TIERS}{}", ROUTER.replace("tier: heavy", "tier: premium"));
+        assert!(Config::from_yaml(PROFILES, &bad).is_err());
+        // one rung is not a ladder
+        let one = format!(
+            "{TIERS}  heavy:\n    model: m\n{}",
+            ROUTER.replace("    - tier: heavy\n      when: anything else\n", "")
+        );
+        assert!(Config::from_yaml(PROFILES, &one).is_err());
+        let conf = format!("{TIERS}  heavy:\n    model: m\n{ROUTER}  min_confidence: 1.5\n");
+        assert!(Config::from_yaml(PROFILES, &conf).is_err());
     }
 
     #[test]

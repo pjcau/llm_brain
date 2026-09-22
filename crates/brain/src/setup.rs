@@ -18,7 +18,9 @@ pub fn data_dir() -> String {
 /// for why each variable is there.
 /// Claude Code's main model: the `agent` tier when configured, else `fast`.
 pub fn claude_main_tier(cfg: &Config) -> &'static str {
-    if cfg.model_for_tier("agent").is_ok() {
+    if cfg.router.is_some() {
+        "auto"
+    } else if cfg.model_for_tier("agent").is_ok() {
         "agent"
     } else {
         "fast"
@@ -38,7 +40,7 @@ pub fn claude_code_proxy(cfg: &Config) -> Result<String> {
            CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 \\\n\
            claude \"$@\"\n\
          }}\n\
-         # cheaper main model for simple sessions: ANTHROPIC_MODEL=brain/fast px-claude\n",
+         # pin a tier instead of the per-session decision: ANTHROPIC_MODEL=brain/agent px-claude\n",
     ))
 }
 
@@ -293,6 +295,16 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("ANTHROPIC_AUTH_TOKEN=\"$BRAIN_DEV_KEY\""));
+        let with_router = Config::from_yaml(
+            "profiles:\n  - {name: dev, tier: fast, daily_limit_usd: 3.0, monthly_soft_usd: 30.0}\n",
+            "tiers:\n  fast: {model: f}\n  agent: {model: deepseek/deepseek-v4-pro}\nrouter:\n  model: typesafe/jev-1.13\n  fallback: agent\n  ladder: [{tier: fast, when: a}, {tier: agent, when: b}]\n",
+        )
+        .unwrap();
+        let out = claude_code_proxy(&with_router).unwrap();
+        assert!(
+            out.contains("ANTHROPIC_MODEL=brain/auto ANTHROPIC_DEFAULT_HAIKU_MODEL=brain/fast"),
+            "{out}"
+        );
     }
 
     #[test]

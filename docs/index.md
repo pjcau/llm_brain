@@ -82,8 +82,10 @@ the full reasoning. Updated at every iteration: see the
   semantic only where it pays. No external proxies. → [Cache logic](./architecture/cache-logic.md)
 - **Claude Code and aider together**, measured on the same task: who burns
   less and gets there first. aider architect/editor = native 90/10. → [Which CLI](./analysis/cli.md)
-- **Escalation on failure beats regex classification** as a routing
-  signal. → [API layer](./architecture/api-layer.md#escalation)
+- **Route once per session, never per turn**: `brain/auto` asks a
+  decision model (Jev, 0.5 s, ~0 $) which rung of the ladder the task
+  needs and keeps the loop there; escalation on failure covers the rest.
+  → [Auto routing](./architecture/auto-routing.md)
 - **In Phase 1 the layer is a reverse proxy, not a translator**: OpenRouter
   already speaks Anthropic and OpenAI. → [Stack](./analysis/stack.md)
 - **Tiers decided from data**: `fast` = deepseek-v4-flash (solved the first
@@ -109,7 +111,7 @@ flowchart LR
         EP_O["/v1/chat/completions<br/>(OpenAI dialect)"]
         TR["Translator<br/>single internal format<br/>(messages, tools, stream, cache hints)"]
         POL["Policy / Profiles<br/>per client: default tier, budget, cache"]
-        RT["Tier router<br/>fast · reasoning · premium<br/>+ escalation on failure"]
+        RT["Tier router<br/>fast · medium · agent · max<br/>brain/auto: per-session decision (Jev)<br/>+ escalation on failure"]
         CACHE["Cache manager<br/>L1 provider prompt cache<br/>L2 gateway response cache"]
         USG["Usage / Budget<br/>SQLite · daily and monthly limit per profile"]
         PV["providers/<br/>openrouter (today) · openai-compat · local (later)"]

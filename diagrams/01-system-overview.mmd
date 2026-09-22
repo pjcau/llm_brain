@@ -13,7 +13,7 @@ flowchart LR
         EP_O["/v1/chat/completions<br/>(OpenAI dialect)"]
         TR["Translator<br/>single internal format<br/>(messages, tools, stream, cache hints)"]
         POL["Policy / Profiles<br/>per client: default tier, budget, cache"]
-        RT["Tier router<br/>fast · reasoning · premium<br/>+ escalation on failure"]
+        RT["Tier router<br/>fast · medium · agent · max<br/>brain/auto: per-session decision (Jev)<br/>+ escalation on failure"]
         CACHE["Cache manager<br/>L1 provider prompt cache<br/>L2 gateway response cache"]
         USG["Usage / Budget<br/>SQLite · daily and monthly limit per profile"]
         PV["providers/<br/>openrouter (today) · openai-compat · local (later)"]

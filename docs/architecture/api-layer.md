@@ -25,7 +25,7 @@ flowchart LR
         EP_O["/v1/chat/completions<br/>(OpenAI dialect)"]
         TR["Translator<br/>single internal format<br/>(messages, tools, stream, cache hints)"]
         POL["Policy / Profiles<br/>per client: default tier, budget, cache"]
-        RT["Tier router<br/>fast · reasoning · premium<br/>+ escalation on failure"]
+        RT["Tier router<br/>fast · medium · agent · max<br/>brain/auto: per-session decision (Jev)<br/>+ escalation on failure"]
         CACHE["Cache manager<br/>L1 provider prompt cache<br/>L2 gateway response cache"]
         USG["Usage / Budget<br/>SQLite · daily and monthly limit per profile"]
         PV["providers/<br/>openrouter (today) · openai-compat · local (later)"]
@@ -59,7 +59,7 @@ flowchart LR
 | **Endpoints** | `/v1/messages` (Anthropic), `/v1/chat/completions` + `/v1/models` (OpenAI) | SSE streaming in both dialects |
 | **Translator** | dialect → single internal format → provider dialect | The most delicate piece: tool schema, stream, thinking, cache hints |
 | **Profiles** | api_key → profile: default tier, budget, cache policy | One per client: `dev`, `market`, `car`, `assistant` |
-| **Tier router** | `brain/*` and `claude-*` aliases → tier → (provider, model) from `tiers.yaml` | routing by alias; no classifier in Phase 1 ([why](#routing-by-task-weight)) |
+| **Tier router** | `brain/*` and `claude-*` aliases → tier → (provider, model) from `tiers.yaml`; `brain/auto` → rung chosen once per session by a decision model | [Auto routing](./auto-routing.md); no per-turn classifier ([why](#routing-by-task-weight)) |
 | **Escalation** | failure signal → retry on a higher tier | v2 |
 | **Cache manager** | L1 (provider prompt cache, translated) + L2 (response cache) | [Cache](./cache.md) |
 | **Usage** | tokens, cache hits, cost, per profile, daily and monthly | `usage.py` ported to `usage.rs` + SQLite |
@@ -113,19 +113,21 @@ action?"* Three levels, from what exists to what is deliberately not done:
    OpenCode and aider (`--architect` / `--editor-model`) split the same
    way. This is where the cheap model belongs: a whole cheap
    sub-conversation, not a cheap turn in the middle of an expensive one.
-2. **Per request, in the proxy (not in Phase 1).** A classifier (rules
-   on the request shape or a cheap model, as claude-code-router and
-   `openrouter/auto` do) could send "light" turns to `fast`. Two costs
-   make it a bad default for an agent loop: every turn carries the whole
-   context, and each model has its own prompt cache, so switching mid-loop
+2. **Per session, in the proxy (done: `brain/auto`).** A decision model
+   (Jev) reads the *first* user message and picks a rung of the ladder
+   (`fast` → `medium` → `agent` → `max`); the choice sticks to the session.
+   → [Auto routing](./auto-routing.md)
+3. **Per request, in the proxy (rejected).** A classifier on every turn,
+   as claude-code-router and `openrouter/auto` do, pays twice in an agent
+   loop: each model has its own prompt cache, so switching mid-loop
    re-reads the 60 KB system prompt at full price; and the turn that
    *looks* light — "call grep" — is the one where a weak model produces
    a broken tool call and starts the retry loop the `agent` tier was
    introduced to stop. The grep itself runs on the laptop for free; what
    is paid is the decision to run it, and that needs the context.
-3. **Escalation on failure (Phase 2, above).** The reliable signal is the
+4. **Escalation on failure (Phase 2, above).** The reliable signal is the
    outcome, not the look of the request: start cheap, raise the tier when
-   tests or tool calls fail.
+   tests or tool calls fail — the ladder makes the next rung obvious.
 
 Measured on `ago-0001` ([Phase 1](../phase-1.md#agents-compared-through-the-proxy)):
 Claude Code needs `agent` for a reliable loop, OpenCode solves the same

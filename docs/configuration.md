@@ -95,14 +95,37 @@ tiers:
     context: 262144
     input_usd_per_m: 0.075
     output_usd_per_m: 0.5
+  medium:                                 # rung between fast and agent
+    model: z-ai/glm-5.3-flash
+    fallback: deepseek/deepseek-v4-flash
+    input_usd_per_m: 0.15
+    output_usd_per_m: 0.50
   agent:                                  # Claude Code's main model through the proxy
     model: deepseek/deepseek-v4-pro       # `deepseek/deepseek-v4-pro:exacto` to force provider sorting by tool-call accuracy
     fallback: qwen/qwen3.7-plus
     context: 1048576
     input_usd_per_m: 0.96
     output_usd_per_m: 1.91
+  max:                                    # top rung
+    model: z-ai/glm-5.3
+    fallback: deepseek/deepseek-v4-pro
+    input_usd_per_m: 0.84
+    output_usd_per_m: 2.64
   premium:
     model: null
+
+# brain/auto: a decision model picks a rung once per session — docs/architecture/auto-routing.md
+router:
+  model: typesafe/jev-1.13
+  fallback: agent                         # decision model down or unsure
+  baseline: agent                         # the board's "would have cost on" reference
+  min_confidence: 0.5
+  session_ttl_s: 7200
+  ladder:                                 # light → heavy; `when` is what the decision model reads
+    - {tier: fast,   when: a trivial edit in one place with no reasoning needed …}
+    - {tier: medium, when: a focused change in one or two files …}
+    - {tier: agent,  when: a change across several files, a bug to debug, tests to run and fix …}
+    - {tier: max,    when: a large refactor, a design decision, a subtle concurrency or security bug …}
 ```
 
 Prices are the OpenRouter catalog's, re-checked 2026-09-22 (they moved
@@ -207,9 +230,10 @@ px-aider() {
 }
 px-claude() {
   ANTHROPIC_BASE_URL="$BRAIN_BASE_URL" ANTHROPIC_AUTH_TOKEN="$BRAIN_DEV_KEY" \
-  ANTHROPIC_MODEL=brain/fast ANTHROPIC_DEFAULT_HAIKU_MODEL=brain/fast \
+  ANTHROPIC_MODEL=brain/auto ANTHROPIC_DEFAULT_HAIKU_MODEL=brain/fast \
   CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 claude "$@"
 }
+# pin a tier instead of the per-session decision: ANTHROPIC_MODEL=brain/agent px-claude
 ```
 
 `brain/fast` and `brain/reasoning` are aliases resolved on the server; the

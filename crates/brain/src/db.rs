@@ -145,6 +145,20 @@ pub struct ModelStat {
     pub max_latency_ms: Option<i64>,
 }
 
+/// `brain/auto` traffic per tier over a window: how many sessions the
+/// decision model sent there and what they cost.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutoTier {
+    pub tier: String,
+    /// First turns (one per session: decided, or a fallback).
+    pub sessions: i64,
+    pub requests: i64,
+    pub input_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: f64,
+}
+
 /// Aggregated proxied traffic for the board.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 pub struct DailyRequests {
@@ -632,6 +646,27 @@ impl Db {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// `brain/auto` requests of the last `days`, per tier (the note carries `auto:<tier>:<how>`).
+    pub fn auto_routed(&self, days: u32) -> Result<Vec<AutoTier>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT tier, SUM(degraded NOT LIKE '%:session%'), COUNT(*),
+                    SUM(input_tokens + cache_write_tokens), SUM(cache_read_tokens), SUM(output_tokens), SUM(cost_usd)
+             FROM requests WHERE ts >= date('now', ?1) AND degraded LIKE '%auto:%' GROUP BY tier ORDER BY SUM(cost_usd) DESC",
+        )?;
+        let rows = stmt.query_map(params![format!("-{days} days")], |r| {
+            Ok(AutoTier {
+                tier: r.get(0)?,
+                sessions: r.get(1)?,
+                requests: r.get(2)?,
+                input_tokens: r.get(3)?,
+                cache_read_tokens: r.get(4)?,
+                output_tokens: r.get(5)?,
+                cost_usd: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// (input+cache_write, cache_read, output) tokens and cost since `since`, all profiles.
     pub fn totals_since(&self, since: DateTime<Utc>) -> Result<(i64, i64, i64, f64)> {
         Ok(self.conn.query_row(
@@ -1019,10 +1054,29 @@ mod tests {
             .totals_since(Utc::now() - chrono::Duration::hours(1))
             .unwrap();
         assert!(inp > 0 && cr == 0 && out > 0 && cost > 0.8);
+        // brain/auto rows: one session = its first turn (decided or a fallback), later turns are `:session`
+        for (tier, note) in [
+            ("medium", "auto:medium:decided max_tokens:1"),
+            ("medium", "auto:medium:session"),
+            ("medium", "auto:medium:session"),
+            ("agent", "auto:agent:error"),
+            ("agent", "auto:agent:decided"),
+        ] {
+            let mut a = row("dev", 0.02);
+            a.tier = tier.into();
+            a.degraded = note.into();
+            db.insert_request(&a).unwrap();
+        }
+        let auto = db.auto_routed(1).unwrap();
+        let by = |t: &str| auto.iter().find(|a| a.tier == t).unwrap().clone();
+        assert_eq!((by("medium").sessions, by("medium").requests), (1, 3));
+        assert_eq!((by("agent").sessions, by("agent").requests), (2, 2));
+        assert!((by("medium").cost_usd - 0.06).abs() < 1e-9);
+        assert_eq!(auto.len(), 2, "pinned-tier rows are not auto traffic");
         assert_eq!(db.auth_failures_since_minutes(10).unwrap(), 1);
         let recent = db.recent_requests(3).unwrap();
         assert_eq!(recent.len(), 3);
-        assert_eq!(recent[0].model, "m-empty", "newest first");
+        assert_eq!(recent[0].degraded, "auto:agent:decided", "newest first");
     }
 
     #[test]

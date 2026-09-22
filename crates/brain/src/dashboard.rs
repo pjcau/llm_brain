@@ -5,8 +5,8 @@
 
 use crate::config::Config;
 use crate::db::{
-    AuditRow, BenchRun, DailyRequests, DailyUsage, DaySpend, Db, ModelStat, RecentRow, SessionRow,
-    TodayProfile,
+    AuditRow, AutoTier, BenchRun, DailyRequests, DailyUsage, DaySpend, Db, ModelStat, RecentRow,
+    SessionRow, TodayProfile,
 };
 use crate::events::{DailyStat, anomalies};
 use axum::{Router, extract::State, response::Html, routing::get};
@@ -61,6 +61,49 @@ pub struct Summary {
     pub version: &'static str,
     /// Authentication failures in the last hour (health strip).
     pub auth_failures_last_hour: i64,
+    /// `brain/auto` over the window: per tier, what the decision model sent there
+    /// and what the same tokens would have cost on the baseline tier.
+    pub auto: Vec<AutoRow>,
+    /// The tier `auto.baseline_cost_usd` is computed against.
+    pub auto_baseline: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AutoRow {
+    pub tier: String,
+    pub model: String,
+    pub sessions: i64,
+    pub requests: i64,
+    pub cost_usd: f64,
+    /// Estimate from the baseline tier's prices (cache reads at 0.1× input).
+    pub baseline_cost_usd: Option<f64>,
+}
+
+/// The board's per-tier view of `brain/auto`.
+pub fn auto_rows(cfg: &Config, auto: &[AutoTier]) -> (Vec<AutoRow>, Option<String>) {
+    let baseline = cfg
+        .router
+        .as_ref()
+        .and_then(|r| r.baseline.clone().or_else(|| Some(r.fallback.clone())));
+    let prices = baseline
+        .as_deref()
+        .and_then(|b| cfg.tiers.get(b))
+        .map(|t| (t.input_usd_per_m, t.output_usd_per_m));
+    let rows = auto
+        .iter()
+        .map(|a| AutoRow {
+            tier: a.tier.clone(),
+            model: cfg.model_for_tier(&a.tier).unwrap_or("").to_string(),
+            sessions: a.sessions,
+            requests: a.requests,
+            cost_usd: a.cost_usd,
+            baseline_cost_usd: prices.filter(|(i, o)| *i > 0.0 || *o > 0.0).map(|(i, o)| {
+                (a.input_tokens as f64 + a.cache_read_tokens as f64 * 0.1) / 1e6 * i
+                    + a.output_tokens as f64 / 1e6 * o
+            }),
+        })
+        .collect();
+    (rows, baseline)
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -141,7 +184,9 @@ pub fn summary(
     models: Vec<ModelStat>,
     month: Month,
     facts: Facts,
+    auto: Vec<AutoTier>,
 ) -> Summary {
+    let (auto, auto_baseline) = auto_rows(cfg, &auto);
     let usage = usage
         .iter()
         .map(|u| {
@@ -212,6 +257,8 @@ pub fn summary(
         facts,
         version: env!("CARGO_PKG_VERSION"),
         auth_failures_last_hour: 0,
+        auto,
+        auto_baseline,
     }
 }
 
@@ -314,6 +361,7 @@ fn load(state: &AppState) -> anyhow::Result<Summary> {
             )
         },
         state.facts.lock().unwrap().clone(),
+        db.auto_routed(state.days)?,
     );
     s.auth_failures_last_hour = failures;
     Ok(s)
@@ -397,6 +445,7 @@ ul{margin:0;padding-left:18px}
 <section id="spend"><h2>Spend per day · by profile <small>last 30 days, USD, from the proxy</small></h2><div class="viz"><svg class="chart" id="spend-chart" role="img" aria-label="Daily spend stacked by profile"></svg><div class="legend" id="spend-legend"></div></div></section>
 <section id="reqs"><h2>Requests per day · ok / upstream errors / refused</h2><div class="viz"><svg class="chart" id="req-chart" role="img" aria-label="Daily requests by outcome"></svg><div class="legend" id="req-legend"></div></div></section>
 <section id="models"><h2>Models · quality and cost <small>last 7 days</small></h2><div class="tw"><table id="models-t"></table></div></section>
+<section id="auto"><h2>Auto routing · brain/auto <small id="auto-sub">per-session decision, last 7 days</small></h2><div class="tw"><table id="auto-t"></table></div></section>
 <section id="health"><h2>Health</h2><div class="health" id="health-l"></div></section>
 <section id="sessions"><h2>Sessions · profile × user <small>last 7 days, proxy only</small></h2><div class="tw"><table id="sessions-t"></table></div></section>
 <section id="proxy"><h2>Proxy · day × profile × model <small>exact, from the proxy</small></h2><div class="tw"><table id="proxied"></table></div></section>
@@ -473,6 +522,10 @@ async function load(){
   document.getElementById('recent-t').innerHTML='<tr><th>when</th><th>profile</th><th>user</th><th class="hide-sm">dialect</th><th>model</th><th class=n>status</th><th class=n>in</th><th class=n>cache</th><th class=n>out</th><th class=n>cost $</th><th class=n>lat s</th><th>notes (cap applied / fields removed / degradation)</th></tr>'+
     (s.recent.map(x=>`<tr class="${x.output_tokens>=20000||x.latency_ms>=600000?'anom':''}"><td title="${esc(x.ts)}">${t(x.ts)}</td><td>${esc(x.profile)}</td><td class="tag">${esc(x.user)}</td><td class="hide-sm tag">${esc(x.dialect)}${x.stream?' · sse':''}</td><td>${esc(x.model)}</td><td class="n ${x.status>=400?'fail':'pass'}">${x.status}</td><td class=n>${x.input_tokens}</td><td class=n>${x.cache_read_tokens}</td><td class=n>${x.output_tokens}</td><td class=n>${f(x.cost_usd,5)}</td><td class=n>${(x.latency_ms/1000).toFixed(1)}</td><td class="tag">${esc(x.degraded)}</td></tr>`).join('')||'<tr><td class=empty colspan=12>nothing yet</td></tr>');
   const anoms=[...(s.proxy_anomalies||[]).map(a=>'proxy · '+a),...s.anomalies.map(a=>'tool logs · '+a)];
+  const base=s.auto_baseline;const aTot=(s.auto||[]).reduce((t,a)=>({c:t.c+a.cost_usd,b:t.b+(a.baseline_cost_usd||0),n:t.n+a.sessions}),{c:0,b:0,n:0});
+  document.getElementById('auto-sub').textContent=base?`per-session decision by the decision model · last 7 days · ${aTot.n} sessions · $${f(aTot.c,3)} vs ≈ $${f(aTot.b,3)} had they all gone to ${base}`:'no router configured';
+  document.getElementById('auto-t').innerHTML=`<tr><th>tier</th><th>model</th><th class=n>sessions</th><th class=n>req</th><th class=n>cost $</th><th class=n>on ${esc(base||'baseline')} ≈ $</th></tr>`+
+    ((s.auto||[]).map(a=>`<tr><td>${esc(a.tier)}</td><td class="tag">${esc(a.model)}</td><td class=n>${a.sessions}</td><td class=n>${a.requests}</td><td class=n>${f(a.cost_usd,4)}</td><td class=n>${a.baseline_cost_usd==null?'-':f(a.baseline_cost_usd,4)}</td></tr>`).join('')||'<tr><td class=empty colspan=6>no brain/auto traffic yet — run px-claude</td></tr>');
   document.getElementById('anom-l').innerHTML=anoms.length?anoms.map(a=>`<li class=anom>${esc(a)}</li>`).join(''):'<li class=empty>none</li>';
   document.getElementById('audit-t').innerHTML='<tr><th>when</th><th>ip</th><th>key</th><th>outcome</th></tr>'+((s.audit||[]).map(a=>`<tr><td>${t(a.ts)}</td><td>${esc(a.ip)}</td><td class="tag">${esc(a.prefix)}</td><td class="${a.outcome==='revoked'?'warn':'fail'}">${esc(a.outcome)}</td></tr>`).join('')||'<tr><td class=empty colspan=4>no failed authentications</td></tr>');
   document.getElementById('events').innerHTML='<tr><th>day</th><th>tool</th><th>model</th><th class=n>req</th><th class=n>err</th><th class=n>bad edits</th><th class=n>retries</th><th class=n>prompt tok</th><th class=n>out tok</th><th class=n>cache</th><th class=n>est $</th><th class=n>lat s</th></tr>'+
@@ -499,6 +552,35 @@ mod tests {
             "tiers:\n  fast: {model: m, input_usd_per_m: 0.04, output_usd_per_m: 0.08}\n",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn auto_rows_price_the_same_tokens_on_the_baseline_tier() {
+        let no_router = auto_rows(&cfg(), &[]);
+        assert!(no_router.0.is_empty() && no_router.1.is_none());
+        let cfg = Config::from_yaml(
+            "profiles:\n  - {name: dev, tier: fast, daily_limit_usd: 3.0, monthly_soft_usd: 30.0}\n",
+            "tiers:\n  fast: {model: f, input_usd_per_m: 0.1, output_usd_per_m: 0.2}\n  agent: {model: a, input_usd_per_m: 1.0, output_usd_per_m: 2.0}\nrouter:\n  model: j\n  fallback: agent\n  ladder: [{tier: fast, when: x}, {tier: agent, when: y}]\n",
+        )
+        .unwrap();
+        let rows = vec![AutoTier {
+            tier: "fast".into(),
+            sessions: 2,
+            requests: 10,
+            input_tokens: 1_000_000,
+            cache_read_tokens: 10_000_000,
+            output_tokens: 500_000,
+            cost_usd: 0.4,
+        }];
+        let (out, baseline) = auto_rows(&cfg, &rows);
+        assert_eq!(
+            baseline.as_deref(),
+            Some("agent"),
+            "fallback when no baseline is set"
+        );
+        assert_eq!((out[0].model.as_str(), out[0].sessions), ("f", 2));
+        // (1M + 10M × 0.1) × 1.0 + 0.5M × 2.0 = 2 + 1
+        assert!((out[0].baseline_cost_usd.unwrap() - 3.0).abs() < 1e-9);
     }
 
     #[test]
@@ -547,6 +629,7 @@ mod tests {
             vec![],
             Month::default(),
             Facts::default(),
+            vec![],
         );
         assert_eq!(s.usage[0].state, "degrade-fast");
         assert!((s.usage[0].pct - 80.0).abs() < 1e-9);

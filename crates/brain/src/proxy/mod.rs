@@ -5,6 +5,7 @@
 //! Bodies pass through as bytes (streaming untouched, never buffered) except
 //! for the JSON shaping in `sanitize`.
 
+pub mod route;
 pub mod sanitize;
 pub mod tap;
 pub mod usage_parse;
@@ -73,6 +74,8 @@ pub struct ProxyState {
     per_user: KeyedLimiter,
     ip_fail: Mutex<HashMap<IpAddr, (u32, Instant)>>,
     catalog: tokio::sync::RwLock<Option<Catalog>>,
+    /// `brain/auto`: session → tier chosen by the decision model.
+    sessions: route::SessionCache,
 }
 
 impl ProxyState {
@@ -93,6 +96,7 @@ impl ProxyState {
             })
             .collect();
         let per_min = |n: u32| Quota::per_minute(NonZeroU32::new(n.max(1)).unwrap());
+        let session_ttl = Duration::from_secs(cfg.router.as_ref().map_or(0, |r| r.session_ttl_s));
         Arc::new(Self {
             cfg,
             db_path,
@@ -108,6 +112,7 @@ impl ProxyState {
             key_cache: Mutex::new(HashMap::new()),
             ip_fail: Mutex::new(HashMap::new()),
             catalog: tokio::sync::RwLock::new(None),
+            sessions: route::SessionCache::new(session_ttl),
         })
     }
 }
@@ -430,6 +435,10 @@ async fn models(
         return r;
     }
     let mut data = Vec::new();
+    if let Some(r) = &st.cfg.router {
+        let rungs: Vec<&str> = r.ladder.iter().map(|x| x.tier.as_str()).collect();
+        data.push(json!({"id": route::ALIAS, "object": "model", "owned_by": "llm_brain", "display_name": format!("brain auto → {}", rungs.join(" | ")), "description": format!("tier chosen per session by {}", r.model)}));
+    }
     for (name, t) in &st.cfg.tiers {
         if let Some(m) = &t.model {
             data.push(json!({"id": format!("brain/{name}"), "object": "model", "owned_by": "llm_brain", "display_name": format!("brain {name} → {m}"), "description": format!("tier {name}")}));
@@ -568,10 +577,60 @@ async fn proxy(
     let is_count = upstream_path.ends_with("count_tokens");
 
     // model + budget
-    let requested = json
+    let mut requested = json
         .get("model")
         .and_then(Value::as_str)
         .map(str::to_string);
+    // brain/auto: one decision per session, the tier sticks for the whole loop
+    let mut routed = String::new();
+    if requested.as_deref() == Some(route::ALIAS)
+        && !is_count
+        && let Some(router) = &st.cfg.router
+    {
+        let sid = headers
+            .get("x-claude-code-session-id")
+            .and_then(|v| v.to_str().ok());
+        let session = route::session_key(&profile.name, sid, &json);
+        let cached = session.as_deref().and_then(|k| st.sessions.get(k));
+        let (tier, how) = match (cached, route::first_user_text(&json)) {
+            (Some(t), _) => (t, "session"),
+            (None, Some(task)) => {
+                match route::classify(
+                    &st.http,
+                    &route::decisions_url(&st.upstream_base),
+                    &upstream_key,
+                    router,
+                    &task,
+                )
+                .await
+                {
+                    Ok((t, conf)) if conf >= router.min_confidence => (t, "decided"),
+                    Ok((t, conf)) => {
+                        eprintln!(
+                            "auto-route: `{t}` at confidence {conf:.2} < {:.2}, using fallback `{}`",
+                            router.min_confidence, router.fallback
+                        );
+                        (router.fallback.clone(), "low-confidence")
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "auto-route failed, using fallback `{}`: {e:#}",
+                            router.fallback
+                        );
+                        (router.fallback.clone(), "error")
+                    }
+                }
+            }
+            (None, None) => (router.fallback.clone(), "no-task"),
+        };
+        if how != "session"
+            && let Some(k) = session
+        {
+            st.sessions.put(k, tier.clone());
+        }
+        routed = format!("auto:{tier}:{how}");
+        requested = Some(format!("brain/{tier}"));
+    }
     let Some(mut resolved) = sanitize::resolve_model(&st.cfg, requested.as_deref(), &profile.tier)
     else {
         return error_response(
@@ -618,6 +677,12 @@ async fn proxy(
         Action::Allow => {}
     }
     let mut degraded = decision.degraded_label().to_string();
+    if !routed.is_empty() {
+        if !degraded.is_empty() {
+            degraded.push(' ');
+        }
+        degraded.push_str(&routed);
+    }
 
     // shaping
     if let Some(obj) = json.as_object_mut() {
@@ -912,7 +977,9 @@ fn row(
 mod tests {
     use super::*;
     use crate::auth;
-    use wiremock::matchers::{bearer_token, body_partial_json, header, method, path};
+    use wiremock::matchers::{
+        bearer_token, body_partial_json, body_string_contains, header, method, path,
+    };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     struct Harness {
@@ -930,7 +997,7 @@ mod tests {
         let cfg = Arc::new(
             Config::from_yaml(
                 "profiles:\n  - {name: dev, tier: fast, daily_limit_usd: 1.0, monthly_soft_usd: 10.0}\n  - {name: car, tier: reasoning, daily_limit_usd: 0.2, monthly_soft_usd: 3.0}\n",
-                "tiers:\n  fast: {model: deepseek/deepseek-v4-flash, fallback: qwen/qwen3.7-flash, input_usd_per_m: 0.04, output_usd_per_m: 0.08}\n  reasoning: {model: prism-ml/ternary-bonsai-2-27b, fallback: deepseek/deepseek-v4-pro, input_usd_per_m: 0.075, output_usd_per_m: 0.5}\n",
+                "tiers:\n  fast: {model: deepseek/deepseek-v4-flash, fallback: qwen/qwen3.7-flash, input_usd_per_m: 0.04, output_usd_per_m: 0.08}\n  reasoning: {model: prism-ml/ternary-bonsai-2-27b, fallback: deepseek/deepseek-v4-pro, input_usd_per_m: 0.075, output_usd_per_m: 0.5}\nrouter:\n  model: typesafe/jev-1.13\n  fallback: fast\n  baseline: reasoning\n  ladder:\n    - {tier: fast, when: trivial}\n    - {tier: reasoning, when: hard}\n",
             )
             .unwrap(),
         );
@@ -1445,6 +1512,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn brain_auto_decides_once_per_session_and_falls_back_on_error_or_low_confidence() {
+        let h = harness(Limits::default()).await;
+        let key = issue(&h.db_path, "dev", "cc", "");
+        let decided = |tier: &str, conf: f64| {
+            ResponseTemplate::new(200).set_body_json(json!({
+                "model": "jev-1.13.0",
+                "answers": {"tier": {"choice": tier, "probabilities": {}, "confidence": conf}},
+                "usage": {"input_tokens": 30, "cost": 0.0000013}
+            }))
+        };
+        // the decision model: one answer per distinct task, the proxy pays with the profile's key
+        Mock::given(method("POST"))
+            .and(path("/alpha/decisions"))
+            .and(bearer_token("sk-or-dev"))
+            .and(body_string_contains("refactor the whole proxy"))
+            .and(body_partial_json(json!({"model": "typesafe/jev-1.13", "questions": {"tier": {"criteria": {"fast": "trivial", "reasoning": "hard"}}}})))
+            .respond_with(decided("reasoning", 0.9))
+            .expect(2)
+            .mount(&h.upstream)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/alpha/decisions"))
+            .and(body_string_contains("unsure task"))
+            .respond_with(decided("reasoning", 0.2))
+            .expect(1)
+            .mount(&h.upstream)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/alpha/decisions"))
+            .and(body_string_contains("broken task"))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_json(json!({"error": {"message": "down"}})),
+            )
+            .expect(1)
+            .mount(&h.upstream)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "g", "choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": {"prompt_tokens": 10, "completion_tokens": 1, "cost": 0.0001}})))
+            .mount(&h.upstream)
+            .await;
+        let send = |sid: Option<&str>, msgs: Value| {
+            let mut r = h
+                .http
+                .post(format!("{}/v1/chat/completions", h.base))
+                .bearer_auth(&key)
+                .json(&json!({"model": "brain/auto", "messages": msgs}));
+            if let Some(sid) = sid {
+                r = r.header("x-claude-code-session-id", sid);
+            }
+            r.send()
+        };
+        // 1. first turn of session s1: decided
+        let first = json!([{"role": "system", "content": "sys"}, {"role": "user", "content": "refactor the whole proxy"}]);
+        assert_eq!(send(Some("s1"), first.clone()).await.unwrap().status(), 200);
+        // 2. later turn, same session, other messages: no new decision
+        let later = json!([{"role": "user", "content": "refactor the whole proxy"}, {"role": "assistant", "content": "…"}, {"role": "user", "content": [{"type": "tool_result", "content": "x"}]}]);
+        assert_eq!(send(Some("s1"), later).await.unwrap().status(), 200);
+        // 3. no header: keyed by the first user message — a session of its own,
+        //    decided once, then remembered
+        assert_eq!(send(None, first.clone()).await.unwrap().status(), 200);
+        assert_eq!(send(None, first).await.unwrap().status(), 200);
+        // 4. low confidence and 5. decision error: fallback tier, the request still goes through
+        let unsure = json!([{"role": "user", "content": "unsure task"}]);
+        assert_eq!(send(Some("s2"), unsure).await.unwrap().status(), 200);
+        let broken = json!([{"role": "user", "content": "broken task"}]);
+        assert_eq!(send(Some("s3"), broken).await.unwrap().status(), 200);
+        // 6. nothing to classify (tool result only, new session): fallback, no decision call
+        let bare = json!([{"role": "user", "content": [{"type": "tool_result", "content": "x"}]}]);
+        assert_eq!(send(Some("s4"), bare).await.unwrap().status(), 200);
+
+        // rows are recorded off the request path, so their order is not the send order
+        let rows = wait_rows(&h.db_path, 7).await;
+        let mut notes: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.tier.as_str(),
+                    r.degraded.split(' ').next().unwrap_or_default(),
+                )
+            })
+            .collect();
+        notes.sort();
+        assert_eq!(
+            notes,
+            vec![
+                ("fast", "auto:fast:error"),
+                ("fast", "auto:fast:low-confidence"),
+                ("fast", "auto:fast:no-task"),
+                ("reasoning", "auto:reasoning:decided"),
+                ("reasoning", "auto:reasoning:decided"),
+                ("reasoning", "auto:reasoning:session"),
+                ("reasoning", "auto:reasoning:session"),
+            ]
+        );
+        let up = posted(&h.upstream, "/chat/completions").await;
+        let mut models: Vec<String> = up
+            .iter()
+            .map(|r| {
+                r.body_json::<Value>().unwrap()["model"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        models.sort();
+        assert_eq!(
+            models,
+            vec![
+                "deepseek/deepseek-v4-flash",
+                "deepseek/deepseek-v4-flash",
+                "deepseek/deepseek-v4-flash",
+                "prism-ml/ternary-bonsai-2-27b",
+                "prism-ml/ternary-bonsai-2-27b",
+                "prism-ml/ternary-bonsai-2-27b",
+                "prism-ml/ternary-bonsai-2-27b"
+            ]
+        );
+        assert_eq!(
+            posted(&h.upstream, "/alpha/decisions").await.len(),
+            4,
+            "one decision per session (header or first-message hash), none for a tool-only start"
+        );
+    }
+
+    #[tokio::test]
     async fn models_lists_aliases_and_profile_without_upstream_key_gets_503() {
         let h = harness(Limits::default()).await;
         let dev = issue(&h.db_path, "dev", "k", "");
@@ -1463,7 +1656,8 @@ mod tests {
             .map(|m| m["id"].as_str().unwrap())
             .collect();
         assert!(
-            ids.contains(&"brain/fast")
+            ids.contains(&"brain/auto")
+                && ids.contains(&"brain/fast")
                 && ids.contains(&"brain/reasoning")
                 && ids.contains(&"deepseek/deepseek-v4-flash")
         );
