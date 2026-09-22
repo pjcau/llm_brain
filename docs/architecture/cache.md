@@ -112,8 +112,9 @@ served each model, with the share of turns that reused the cache. **Prompt
 cache** turns it into money, per UTC day: requests, **cold turns** — a prompt
 of at least 5000 tokens that read *nothing* from cache, which is a prefix paid
 again rather than a new conversation — the share of prompt tokens served from
-cache, and an estimate of what those re-reads cost above the warm price (the
-tier's input price, cache reads at 0.1×; an estimate, not a billed figure).
+cache, and an estimate of what those re-reads cost above the warm price: nine
+tenths of what those turns were actually billed (cache reads cost about a tenth
+of full price). It comes from recorded cost, not from catalog prices, which move.
 
 First 45 minutes after the cutover (2026-09-22T17:24Z):
 

@@ -125,23 +125,21 @@ pub struct CacheRow {
     pub cache_read_tokens: i64,
     pub full_price_tokens: i64,
     pub cost_usd: f64,
-    /// Estimate: what the cold prefix re-reads cost *above* the warm price,
-    /// from the tier's input price. Not a billed figure.
+    /// Estimate of what the cold prefix re-reads cost *above* the warm price,
+    /// from what those turns were billed. An estimate, but never more than the
+    /// day's spend.
     pub waste_usd: f64,
 }
 
-/// Groups [`CacheDay`] rows (day × model) into one row per day, pricing each
-/// model's cold re-reads with its own tier. Input order is kept, so the
-/// newest day stays first.
-pub fn cache_rows(cfg: &Config, days: &[CacheDay]) -> Vec<CacheRow> {
+/// Groups [`CacheDay`] rows (day × model) into one row per day. The waste is
+/// taken from what the cold turns were actually billed, never from catalog
+/// prices: those move — they roughly doubled on 2026-09-22 — and pricing old
+/// tokens at today's rate produced a day that had "lost" more than it spent.
+/// Input order is kept, so the newest day stays first.
+pub fn cache_rows(days: &[CacheDay]) -> Vec<CacheRow> {
     let mut out: Vec<CacheRow> = Vec::new();
     for d in days {
-        let price = cfg
-            .tiers
-            .get(&d.tier)
-            .map(|t| t.input_usd_per_m)
-            .unwrap_or(0.0);
-        let waste = d.cold_prompt_tokens as f64 / 1e6 * price * (1.0 - CACHE_READ_FACTOR);
+        let waste = d.cold_cost_usd * (1.0 - CACHE_READ_FACTOR);
         let row = match out.iter_mut().find(|r| r.day == d.day) {
             Some(r) => r,
             None => {
@@ -245,7 +243,7 @@ pub fn summary(
     cache: Vec<CacheDay>,
 ) -> Summary {
     let (auto, auto_baseline) = auto_rows(cfg, &auto);
-    let cache = cache_rows(cfg, &cache);
+    let cache = cache_rows(&cache);
     let usage = usage
         .iter()
         .map(|u| {
@@ -844,61 +842,41 @@ mod tests {
         assert!(s["usage"].as_array().unwrap().is_empty());
         assert!(s["anomalies"].as_array().unwrap().is_empty());
     }
-
     #[test]
-    fn cache_rows_group_by_day_and_price_the_cold_re_reads_with_each_tier() {
-        let cfg = cfg();
-        let fast = cfg.tiers.get("fast").unwrap().input_usd_per_m;
-        let days = vec![
-            CacheDay {
-                day: "2026-09-22".into(),
-                model: "m".into(),
-                tier: "fast".into(),
-                requests: 10,
-                cold_requests: 2,
-                cache_read_tokens: 900_000,
-                cold_prompt_tokens: 200_000,
-                full_price_tokens: 100_000,
-                cost_usd: 0.5,
-            },
-            CacheDay {
-                day: "2026-09-22".into(),
-                model: "other".into(),
-                tier: "nosuchtier".into(),
-                requests: 1,
-                cold_requests: 1,
-                cache_read_tokens: 0,
-                cold_prompt_tokens: 50_000,
-                full_price_tokens: 50_000,
-                cost_usd: 0.1,
-            },
-            CacheDay {
-                day: "2026-09-21".into(),
-                model: "m".into(),
-                tier: "fast".into(),
-                requests: 3,
-                cold_requests: 0,
-                cache_read_tokens: 300_000,
-                cold_prompt_tokens: 0,
-                full_price_tokens: 10_000,
-                cost_usd: 0.05,
-            },
-        ];
-        let rows = cache_rows(&cfg, &days);
+    fn cache_rows_group_by_day_and_take_the_waste_from_what_the_cold_turns_cost() {
+        let day = |day: &str, cold_req, cold_cost, cost| CacheDay {
+            day: day.into(),
+            model: "m".into(),
+            tier: "fast".into(),
+            requests: 10,
+            cold_requests: cold_req,
+            cache_read_tokens: 900_000,
+            cold_prompt_tokens: 200_000,
+            full_price_tokens: 100_000,
+            cost_usd: cost,
+            cold_cost_usd: cold_cost,
+        };
+        let rows = cache_rows(&[
+            day("2026-09-22", 2, 0.40, 0.50),
+            day("2026-09-22", 1, 0.10, 0.20),
+            day("2026-09-21", 0, 0.0, 0.05),
+        ]);
         assert_eq!(rows.len(), 2, "one row per day, order kept");
         assert_eq!(rows[0].day, "2026-09-22");
         assert_eq!(
             (rows[0].requests, rows[0].cold_requests),
-            (11, 3),
+            (20, 3),
             "models of the same day are summed"
         );
-        let expected = 200_000.0 / 1e6 * fast * 0.9;
         assert!(
-            (rows[0].waste_usd - expected).abs() < 1e-12,
-            "the unknown tier prices at 0, the fast one at its own price: {} vs {expected}",
+            (rows[0].waste_usd - 0.45).abs() < 1e-12,
+            "nine tenths of the $0.50 those cold turns were billed: {}",
             rows[0].waste_usd
         );
-        assert_eq!(rows[1].cold_requests, 0);
+        assert!(
+            rows[0].waste_usd < rows[0].cost_usd,
+            "the estimate can never exceed the day's spend"
+        );
         assert_eq!(rows[1].waste_usd, 0.0, "nothing cold, nothing lost");
     }
 }

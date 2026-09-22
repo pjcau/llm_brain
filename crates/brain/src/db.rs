@@ -185,6 +185,9 @@ pub struct CacheDay {
     /// Prompt tokens billed at full price on every request, cold or not.
     pub full_price_tokens: i64,
     pub cost_usd: f64,
+    /// What the cold requests actually cost. Almost all of it is the prefix:
+    /// on a cold turn measured 2026-09-22, prompt was 98 % of the bill.
+    pub cold_cost_usd: f64,
 }
 /// `brain/auto` traffic per tier over a window: how many sessions the
 /// decision model sent there and what they cost.
@@ -755,7 +758,9 @@ impl Db {
                     SUM(cache_read_tokens),
                     SUM(CASE WHEN cache_read_tokens = 0 AND input_tokens + cache_write_tokens >= ?2
                              THEN input_tokens + cache_write_tokens ELSE 0 END),
-                    SUM(input_tokens + cache_write_tokens), SUM(cost_usd)
+                    SUM(input_tokens + cache_write_tokens), SUM(cost_usd),
+                    SUM(CASE WHEN cache_read_tokens = 0 AND input_tokens + cache_write_tokens >= ?2
+                             THEN cost_usd ELSE 0 END)
              FROM requests WHERE ts >= datetime('now', ?1) AND model != '' AND status < 400
              GROUP BY day, model, tier ORDER BY day DESC, SUM(cost_usd) DESC",
         )?;
@@ -770,6 +775,7 @@ impl Db {
                 cold_prompt_tokens: r.get(6)?,
                 full_price_tokens: r.get(7)?,
                 cost_usd: r.get(8)?,
+                cold_cost_usd: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -1227,6 +1233,11 @@ mod tests {
             "only the long cold prompt counts, the 10-token one does not"
         );
         assert_eq!(c.cache_read_tokens, 210_000 + 900);
+        assert!(
+            (c.cold_cost_usd - 0.03).abs() < 1e-12,
+            "only the cold turn's own bill: {}",
+            c.cold_cost_usd
+        );
     }
 
     #[test]
