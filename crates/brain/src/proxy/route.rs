@@ -63,10 +63,14 @@ impl SessionCache {
     }
 }
 
-/// What identifies a conversation: Claude Code's session header when
-/// present, else a hash of the first user message (OpenRouter's own
-/// fingerprint), scoped to the profile. `None` when there is no user text
-/// at all (nothing to classify either).
+/// Headers a client may use to name its conversation, in order of precedence:
+/// ours for apps, Claude Code's own.
+pub const SESSION_HEADERS: [&str; 2] = ["x-brain-session", "x-claude-code-session-id"];
+
+/// What identifies a conversation: a session header when present, else a
+/// hash of the first user message (OpenRouter's own fingerprint), scoped to
+/// the profile. `None` when there is no user text at all (nothing to
+/// classify either).
 pub fn session_key(profile: &str, session_header: Option<&str>, body: &Value) -> Option<String> {
     if let Some(sid) = session_header.map(str::trim).filter(|s| !s.is_empty()) {
         return Some(format!("{profile}:h:{sid}"));
@@ -116,7 +120,7 @@ pub async fn classify(
         .collect();
     let body = json!({
         "model": router.model,
-        "state": format!("Task given to an autonomous coding agent: {state}"),
+        "state": format!("{}: {state}", router.context),
         "questions": {
             "tier": {
                 "type": "choice",
@@ -189,6 +193,7 @@ mod tests {
             min_confidence: 0.5,
             session_ttl_s: 60,
             baseline: None,
+            context: "Task given to an autonomous coding agent".into(),
         }
     }
 
@@ -251,6 +256,7 @@ mod tests {
             .and(header("authorization", "Bearer sk-up"))
             .and(body_partial_json(json!({
                 "model": "typesafe/jev-1.13",
+                "state": "Task given to an autonomous coding agent: fix a typo",
                 "questions": {"tier": {"type": "choice", "criteria": {"fast": "trivial", "agent": "hard"}}}
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({

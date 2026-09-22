@@ -72,6 +72,15 @@ profiles:
     daily_limit_usd: 0.5
     monthly_soft_usd: 15.0
     l2_cache: exact
+    router:            # its own brain/auto ladder (chat, not coding) — see Auto routing
+      model: typesafe/jev-1.13
+      context: Message from a user to a personal chat assistant that can search the user's documents
+      fallback: fast
+      baseline: medium
+      ladder:
+        - {tier: fast,   when: a greeting, a short factual question, a lookup or FAQ …}
+        - {tier: medium, when: an explanation, a summary or comparison, drafting a text …}
+        - {tier: agent,  when: a multi-step analysis, a long structured document, planning …}
   - name: car          # find-a-car
     tier: fast
     daily_limit_usd: 0.5
@@ -115,8 +124,9 @@ tiers:
     model: null
 
 # brain/auto: a decision model picks a rung once per session — docs/architecture/auto-routing.md
-router:
+router:                                   # global ladder; a profile's own `router` replaces it
   model: typesafe/jev-1.13
+  context: Task given to an autonomous coding agent   # prefixed to what the decision model reads
   fallback: agent                         # decision model down or unsure
   baseline: agent                         # the board's "would have cost on" reference
   min_confidence: 0.5

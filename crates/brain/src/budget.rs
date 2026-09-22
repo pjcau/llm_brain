@@ -117,6 +117,7 @@ mod tests {
             daily_limit_usd: 3.0,
             monthly_soft_usd: 30.0,
             l2_cache: "off".into(),
+            router: None,
         }
     }
 

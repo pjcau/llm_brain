@@ -26,6 +26,23 @@ profiles:
     daily_limit_usd: 0.5
     monthly_soft_usd: 15.0
     l2_cache: exact
+    # brain/auto for a chat app: its own ladder, read by the decision model
+    # (the global one in tiers.yaml is written for a coding agent). The app
+    # names the conversation with the `x-brain-session` header.
+    router:
+      model: typesafe/jev-1.13
+      context: Message from a user to a personal chat assistant that can search the user's documents
+      fallback: fast                   # a chat answer on the cheap tier is never a disaster
+      baseline: medium
+      min_confidence: 0.5
+      session_ttl_s: 7200
+      ladder:
+        - tier: fast
+          when: a greeting, a short factual question, a lookup or FAQ answerable in a few sentences, a simple follow-up or a yes/no
+        - tier: medium
+          when: an explanation, a summary or comparison of documents, drafting or rewriting a text, a question that needs reasoning over several facts
+        - tier: agent
+          when: a multi-step analysis, a long structured document to write, planning, or a question where a wrong answer is costly and needs careful reasoning
   - name: car
     description: find-a-car second hand (valuation, extraction)
     tier: fast

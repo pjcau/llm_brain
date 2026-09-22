@@ -96,7 +96,7 @@ impl ProxyState {
             })
             .collect();
         let per_min = |n: u32| Quota::per_minute(NonZeroU32::new(n.max(1)).unwrap());
-        let session_ttl = Duration::from_secs(cfg.router.as_ref().map_or(0, |r| r.session_ttl_s));
+        let session_ttl = cfg.session_ttl();
         Arc::new(Self {
             cfg,
             db_path,
@@ -585,11 +585,11 @@ async fn proxy(
     let mut routed = String::new();
     if requested.as_deref() == Some(route::ALIAS)
         && !is_count
-        && let Some(router) = &st.cfg.router
+        && let Some(router) = st.cfg.router_for(&profile)
     {
-        let sid = headers
-            .get("x-claude-code-session-id")
-            .and_then(|v| v.to_str().ok());
+        let sid = route::SESSION_HEADERS
+            .iter()
+            .find_map(|h| headers.get(*h).and_then(|v| v.to_str().ok()));
         let session = route::session_key(&profile.name, sid, &json);
         let cached = session.as_deref().and_then(|k| st.sessions.get(k));
         let (tier, how) = match (cached, route::first_user_text(&json)) {
@@ -1567,9 +1567,18 @@ mod tests {
         // 1. first turn of session s1: decided
         let first = json!([{"role": "system", "content": "sys"}, {"role": "user", "content": "refactor the whole proxy"}]);
         assert_eq!(send(Some("s1"), first.clone()).await.unwrap().status(), 200);
-        // 2. later turn, same session, other messages: no new decision
+        // 2. later turn, same session, other messages: no new decision — the app header names the same session
         let later = json!([{"role": "user", "content": "refactor the whole proxy"}, {"role": "assistant", "content": "…"}, {"role": "user", "content": [{"type": "tool_result", "content": "x"}]}]);
-        assert_eq!(send(Some("s1"), later).await.unwrap().status(), 200);
+        let r = h
+            .http
+            .post(format!("{}/v1/chat/completions", h.base))
+            .bearer_auth(&key)
+            .header("x-brain-session", "s1")
+            .json(&json!({"model": "brain/auto", "messages": later}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
         // 3. no header: keyed by the first user message — a session of its own,
         //    decided once, then remembered
         assert_eq!(send(None, first.clone()).await.unwrap().status(), 200);

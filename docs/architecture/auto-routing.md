@@ -39,9 +39,10 @@ sequenceDiagram
 ## How it works
 
 1. A client sends `model: brain/auto`. The proxy identifies the
-   **session**: Claude Code's `x-claude-code-session-id` header when
-   present, else a hash of the first user message (the same fingerprint
-   OpenRouter uses for its own routers), scoped to the profile.
+   **session**: the `x-brain-session` header (apps name their
+   conversation), else Claude Code's `x-claude-code-session-id`, else a
+   hash of the first user message (the same fingerprint OpenRouter uses
+   for its own routers), scoped to the profile.
 2. On the **first turn** of a session, the first user message goes to a
    **decision model**: [Jev](https://openrouter.ai/typesafe)
    (`typesafe/jev-1.13`) through OpenRouter's `/api/alpha/decisions`
@@ -78,6 +79,41 @@ routing* section shows sessions per rung and what the same tokens would
 have cost on the `baseline` tier (`agent`, what `px-claude` used before),
 so the saving is a number, not a feeling. Promotion or demotion of a rung
 follows the benchmark, as for any tier.
+
+## One ladder per kind of client
+
+The global `router` in `tiers.yaml` is written for a coding agent (its
+`context` sentence and the rungs' `when` criteria talk about files and
+refactors). An app's messages are something else, so a **profile can
+carry its own `router`** in `profiles.yaml`, which replaces the global one
+for that profile: its own context sentence, rungs, fallback and baseline.
+
+The `assistant` profile (chat + RAG) has one: `fast` for greetings,
+short factual questions, lookups and follow-ups; `medium` for
+explanations, summaries, comparisons and drafting; `agent` for
+multi-step analysis and long structured writing. Fallback `fast` (a chat
+answer on the cheap tier is never a disaster), baseline `medium`. Tried
+on four real chat messages before shipping: greeting → `fast` (1.00),
+document lookup → `fast` (0.43, below `min_confidence`, so the fallback —
+also `fast`), "compare the two quotes" → `medium` (0.98), "write the full
+business plan" → `agent` (0.99).
+
+### In the app
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url=f"{BRAIN_BASE_URL}/v1", api_key=BRAIN_ASSISTANT_KEY)
+client.chat.completions.create(
+    model="brain/auto",
+    messages=history,                                   # the whole conversation, as for context
+    stream=True,
+    extra_headers={"x-brain-session": conversation_id}, # one decision per conversation
+)
+```
+
+Without the header the proxy keys the session on the first user message,
+which works as long as the app sends the full history every turn. The
+board shows the assistant's sessions per rung like any other profile.
 
 ## Why per session and not per turn
 

@@ -16,6 +16,10 @@ pub struct Profile {
     pub monthly_soft_usd: f64,
     #[serde(default = "default_l2")]
     pub l2_cache: String,
+    /// Profile-specific `brain/auto` ladder (an app's tasks are not a coding
+    /// agent's); replaces the global `router` of tiers.yaml for this profile.
+    #[serde(default)]
+    pub router: Option<Router>,
 }
 
 fn default_l2() -> String {
@@ -63,6 +67,9 @@ pub struct Rung {
 pub struct Router {
     /// Decision model id, e.g. `typesafe/jev-1.13`.
     pub model: String,
+    /// Who is asking, prefixed to the message the decision model reads.
+    #[serde(default = "default_context")]
+    pub context: String,
     /// Light to heavy.
     pub ladder: Vec<Rung>,
     /// Tier used when the decision model fails or answers with low confidence.
@@ -76,6 +83,10 @@ pub struct Router {
     /// The tier a client would otherwise use, for the board's "saved vs" figure.
     #[serde(default)]
     pub baseline: Option<String>,
+}
+
+fn default_context() -> String {
+    "Task given to an autonomous coding agent".into()
 }
 
 fn default_min_confidence() -> f64 {
@@ -148,33 +159,57 @@ impl Config {
             }
         }
         if let Some(r) = &self.router {
-            if r.ladder.len() < 2 {
-                bail!("router.ladder needs at least two rungs");
-            }
-            for rung in &r.ladder {
-                if self.model_for_tier(&rung.tier).is_err() {
-                    bail!(
-                        "router.ladder references tier `{}` without a model",
-                        rung.tier
-                    );
-                }
-                if rung.when.trim().is_empty() {
-                    bail!(
-                        "router.ladder rung `{}` needs a `when` description",
-                        rung.tier
-                    );
-                }
-            }
-            for t in std::iter::once(&r.fallback).chain(r.baseline.iter()) {
-                if self.model_for_tier(t).is_err() {
-                    bail!("router references tier `{t}` without a model");
-                }
-            }
-            if !(0.0..=1.0).contains(&r.min_confidence) {
-                bail!("router.min_confidence must be within 0..=1");
+            self.validate_router(r, "router")?;
+        }
+        for p in &self.profiles {
+            if let Some(r) = &p.router {
+                self.validate_router(r, &format!("profile `{}` router", p.name))?;
             }
         }
         Ok(())
+    }
+
+    fn validate_router(&self, r: &Router, what: &str) -> Result<()> {
+        if r.ladder.len() < 2 {
+            bail!("{what}: ladder needs at least two rungs");
+        }
+        for rung in &r.ladder {
+            if self.model_for_tier(&rung.tier).is_err() {
+                bail!(
+                    "{what}: ladder references tier `{}` without a model",
+                    rung.tier
+                );
+            }
+            if rung.when.trim().is_empty() {
+                bail!(
+                    "{what}: ladder rung `{}` needs a `when` description",
+                    rung.tier
+                );
+            }
+        }
+        for t in std::iter::once(&r.fallback).chain(r.baseline.iter()) {
+            if self.model_for_tier(t).is_err() {
+                bail!("{what}: references tier `{t}` without a model");
+            }
+        }
+        if !(0.0..=1.0).contains(&r.min_confidence) {
+            bail!("{what}: min_confidence must be within 0..=1");
+        }
+        Ok(())
+    }
+
+    /// The `brain/auto` router of a profile: its own, else the global one.
+    pub fn router_for<'a>(&'a self, profile: &'a Profile) -> Option<&'a Router> {
+        profile.router.as_ref().or(self.router.as_ref())
+    }
+
+    /// The longest session TTL any router asks for (one cache serves them all).
+    pub fn session_ttl(&self) -> std::time::Duration {
+        let all = self
+            .router
+            .iter()
+            .chain(self.profiles.iter().filter_map(|p| p.router.as_ref()));
+        std::time::Duration::from_secs(all.map(|r| r.session_ttl_s).max().unwrap_or(0))
     }
 
     pub fn profile(&self, name: &str) -> Result<&Profile> {
@@ -332,6 +367,38 @@ router:
         assert!(Config::from_yaml(PROFILES, &one).is_err());
         let conf = format!("{TIERS}  heavy:\n    model: m\n{ROUTER}  min_confidence: 1.5\n");
         assert!(Config::from_yaml(PROFILES, &conf).is_err());
+        // a profile can carry its own ladder and context; it wins over the global one
+        let profiles = PROFILES.replace(
+            "    l2_cache: exact\n",
+            "    l2_cache: exact\n    router:\n      model: typesafe/jev-1.13\n      context: Message to a chat assistant\n      fallback: fast\n      session_ttl_s: 9000\n      ladder:\n        - {tier: fast, when: simple}\n        - {tier: heavy, when: hard}\n",
+        );
+        let cfg = Config::from_yaml(&profiles, &tiers).unwrap();
+        let car = cfg.profile("car").unwrap();
+        assert_eq!(
+            cfg.router_for(car).unwrap().context,
+            "Message to a chat assistant"
+        );
+        assert_eq!(
+            cfg.router_for(cfg.profile("dev").unwrap()).unwrap().context,
+            "Task given to an autonomous coding agent"
+        );
+        assert_eq!(cfg.session_ttl().as_secs(), 9000, "longest TTL wins");
+        let bad = profiles.replace("fallback: fast", "fallback: premium");
+        assert!(Config::from_yaml(&bad, &tiers).is_err());
+        // a profile router without a global one still routes that profile only
+        let only_profile =
+            Config::from_yaml(&profiles, &format!("{TIERS}  heavy:\n    model: m\n")).unwrap();
+        assert!(only_profile.router.is_none());
+        assert!(
+            only_profile
+                .router_for(only_profile.profile("car").unwrap())
+                .is_some()
+        );
+        assert!(
+            only_profile
+                .router_for(only_profile.profile("dev").unwrap())
+                .is_none()
+        );
     }
 
     #[test]
