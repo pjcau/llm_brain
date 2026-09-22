@@ -5,8 +5,8 @@
 
 use crate::config::Config;
 use crate::db::{
-    AuditRow, AutoTier, BenchRun, DailyRequests, DailyUsage, DaySpend, Db, ModelStat, ProviderStat,
-    RecentRow, SessionRow, TodayProfile,
+    AuditRow, AutoTier, BenchRun, CacheDay, DailyRequests, DailyUsage, DaySpend, Db, ModelStat,
+    ProviderStat, RecentRow, SessionRow, TodayProfile,
 };
 use crate::events::{DailyStat, anomalies};
 use axum::{Router, extract::State, response::Html, routing::get};
@@ -69,6 +69,9 @@ pub struct Summary {
     /// Who actually served each model over the window: one row per backend, with
     /// the share of turns that reused the prompt cache.
     pub providers: Vec<ProviderStat>,
+    /// Per day: how much of the prompt came from cache and what the cold
+    /// re-reads cost on top. Newest day first.
+    pub cache: Vec<CacheRow>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -107,6 +110,56 @@ pub fn auto_rows(cfg: &Config, auto: &[AutoTier]) -> (Vec<AutoRow>, Option<Strin
         })
         .collect();
     (rows, baseline)
+}
+
+/// Cache reads are billed at roughly a tenth of the input price (measured
+/// 2026-09-22 on `deepseek-v4-pro`: $0.076/M against $0.92/M).
+const CACHE_READ_FACTOR: f64 = 0.1;
+
+/// The board's per-day prompt-cache view.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CacheRow {
+    pub day: String,
+    pub requests: i64,
+    pub cold_requests: i64,
+    pub cache_read_tokens: i64,
+    pub full_price_tokens: i64,
+    pub cost_usd: f64,
+    /// Estimate: what the cold prefix re-reads cost *above* the warm price,
+    /// from the tier's input price. Not a billed figure.
+    pub waste_usd: f64,
+}
+
+/// Groups [`CacheDay`] rows (day × model) into one row per day, pricing each
+/// model's cold re-reads with its own tier. Input order is kept, so the
+/// newest day stays first.
+pub fn cache_rows(cfg: &Config, days: &[CacheDay]) -> Vec<CacheRow> {
+    let mut out: Vec<CacheRow> = Vec::new();
+    for d in days {
+        let price = cfg
+            .tiers
+            .get(&d.tier)
+            .map(|t| t.input_usd_per_m)
+            .unwrap_or(0.0);
+        let waste = d.cold_prompt_tokens as f64 / 1e6 * price * (1.0 - CACHE_READ_FACTOR);
+        let row = match out.iter_mut().find(|r| r.day == d.day) {
+            Some(r) => r,
+            None => {
+                out.push(CacheRow {
+                    day: d.day.clone(),
+                    ..Default::default()
+                });
+                out.last_mut().expect("just pushed")
+            }
+        };
+        row.requests += d.requests;
+        row.cold_requests += d.cold_requests;
+        row.cache_read_tokens += d.cache_read_tokens;
+        row.full_price_tokens += d.full_price_tokens;
+        row.cost_usd += d.cost_usd;
+        row.waste_usd += waste;
+    }
+    out
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -189,8 +242,10 @@ pub fn summary(
     facts: Facts,
     auto: Vec<AutoTier>,
     providers: Vec<ProviderStat>,
+    cache: Vec<CacheDay>,
 ) -> Summary {
     let (auto, auto_baseline) = auto_rows(cfg, &auto);
+    let cache = cache_rows(cfg, &cache);
     let usage = usage
         .iter()
         .map(|u| {
@@ -264,6 +319,7 @@ pub fn summary(
         auto,
         auto_baseline,
         providers,
+        cache,
     }
 }
 
@@ -368,6 +424,7 @@ fn load(state: &AppState) -> anyhow::Result<Summary> {
         state.facts.lock().unwrap().clone(),
         db.auto_routed(state.days)?,
         db.provider_stats(state.days)?,
+        db.cache_daily(state.days)?,
     );
     s.auth_failures_last_hour = failures;
     Ok(s)
@@ -444,7 +501,7 @@ ul{margin:0;padding-left:18px}
 </style></head><body>
 <header><h1>llm_brain</h1><span id="ts">loading…</span><span>auto-refresh 30 s</span>
 <span class="seg" id="theme" title="theme"><button data-t="auto">auto</button><button data-t="light">light</button><button data-t="dark">dark</button></span>
-<nav><a href="#kpi">month</a><a href="#budget">budget</a><a href="#spend">spend</a><a href="#models">models</a><a href="#providers">providers</a><a href="#sessions">sessions</a><a href="#proxy">proxy</a><a href="#recent">live</a><a href="#anom">anomalies</a><a href="#audit">auth</a><a href="#bench">bench</a></nav></header>
+<nav><a href="#kpi">month</a><a href="#budget">budget</a><a href="#spend">spend</a><a href="#models">models</a><a href="#providers">providers</a><a href="#cache">cache</a><a href="#sessions">sessions</a><a href="#proxy">proxy</a><a href="#recent">live</a><a href="#anom">anomalies</a><a href="#audit">auth</a><a href="#bench">bench</a></nav></header>
 <main>
 <section id="kpi"><h2>Month <small id="kpi-sub"></small></h2><div class="kpis" id="kpis"></div></section>
 <section id="budget"><h2>Budget · today per profile <small id="budget-sub"></small></h2><div class="cards" id="usage"></div></section>
@@ -453,6 +510,7 @@ ul{margin:0;padding-left:18px}
 <section id="models"><h2>Models · quality and cost <small>last 7 days</small></h2><div class="tw"><table id="models-t"></table></div></section>
 <section id="auto"><h2>Auto routing · brain/auto <small id="auto-sub">per-session decision, last 7 days</small></h2><div class="tw"><table id="auto-t"></table></div></section>
 <section id="providers"><h2>Providers · who serves, and where the cache lives <small id="prov-sub">last 7 days</small></h2><div class="tw"><table id="prov-t"></table></div></section>
+<section id="cache"><h2>Prompt cache · what the cold re-reads cost <small id="cache-sub">last 7 days</small></h2><div class="tw"><table id="cache-t"></table></div></section>
 <section id="health"><h2>Health</h2><div class="health" id="health-l"></div></section>
 <section id="sessions"><h2>Sessions · profile × user <small>last 7 days, proxy only</small></h2><div class="tw"><table id="sessions-t"></table></div></section>
 <section id="proxy"><h2>Proxy · day × profile × model <small>exact, from the proxy</small></h2><div class="tw"><table id="proxied"></table></div></section>
@@ -480,11 +538,14 @@ async function load(){
   const pct=m.soft_cap_usd?Math.min(100,m.projected_usd/m.soft_cap_usd*100):0;
   const saved=m.claude_would_cost_usd!=null?m.claude_would_cost_usd-m.spent_usd:null;
   document.getElementById('kpi-sub').textContent=`day ${m.day_of_month} of ${m.days_in_month}`;
+  const cTot=(s.cache||[]).reduce((t,d)=>({k:t.k+d.cache_read_tokens,fp:t.fp+d.full_price_tokens,w:t.w+d.waste_usd}),{k:0,fp:0,w:0});
+  const cacheHit=(cTot.k+cTot.fp)?100*cTot.k/(cTot.k+cTot.fp):null, cacheWaste=cTot.w;
   document.getElementById('kpis').innerHTML=[
     `<div class="kpi"><div class="l">spent this month</div><div class="v">$${f(m.spent_usd,2)}</div><div class="s">soft cap $${f(m.soft_cap_usd,0)} across profiles</div></div>`,
     `<div class="kpi"><div class="l">projected month end</div><div class="v">$${f(m.projected_usd,2)}</div><div class="s">${pct.toFixed(0)}% of the soft cap at this pace</div><div class="meter ${pct>=100?'bad':pct>=70?'warn':''}"><i style="width:${pct}%"></i></div></div>`,
     `<div class="kpi"><div class="l">today</div><div class="v">$${f(m.today_usd,3)}</div><div class="s">${m.today_claude_would_cost_usd!=null?'on Claude: $'+f(m.today_claude_would_cost_usd,2):''}</div></div>`,
     `<div class="kpi"><div class="l">saved vs Claude · month</div><div class="v">${saved==null?'-':'$'+f(saved,2)}</div><div class="s">${fr.claude_ref?'same tokens on '+esc(fr.claude_ref[0].replace('anthropic/','')):'reference price unknown'}</div></div>`
+    ,`<div class="kpi"><div class="l">prompt cache · 7 d</div><div class="v">${cacheHit==null?'-':cacheHit.toFixed(1)+'%'}</div><div class="s">${cacheHit==null?'no proxied prompts yet':'≈ $'+f(cacheWaste,2)+' lost to cold re-reads'}</div><div class="meter ${cacheHit!=null&&cacheHit<80?'bad':cacheHit!=null&&cacheHit<92?'warn':''}"><i style="width:${cacheHit||0}%"></i></div></div>`
   ].join('');
   // --- charts (inline SVG) ---
   const tip=document.getElementById('tip');
@@ -539,6 +600,13 @@ async function load(){
   document.getElementById('prov-sub').textContent=pT.r?`last 7 days · ${pv.length} backends · ${(100*pT.c/pT.r).toFixed(0)}% of turns reused the cache · ${(pT.u/1e6).toFixed(2)}M prompt tokens paid at full price`:'last 7 days';
   document.getElementById('prov-t').innerHTML='<tr><th>model</th><th>provider</th><th class=n>req</th><th class=n>cache hit %</th><th class=n>full-price prompt tok</th><th class=n>cached tok</th><th class=n>cost $</th><th class=n>lat s</th></tr>'+
     (pv.map(p=>{const hit=p.requests?100*p.cached_requests/p.requests:0;const cls=hit<50?'fail':hit<90?'warn':'pass';return `<tr><td class="tag">${esc(p.model)}</td><td>${esc(p.provider)}</td><td class=n>${p.requests}</td><td class="n ${cls}">${hit.toFixed(0)}</td><td class=n>${(p.uncached_prompt_tokens/1000).toFixed(0)}k</td><td class=n>${(p.cache_read_tokens/1000).toFixed(0)}k</td><td class=n>${f(p.cost_usd,4)}</td><td class=n>${f((p.avg_latency_ms||0)/1000,1)}</td></tr>`}).join('')||'<tr><td class=empty colspan=8>no provider recorded yet — rows are filled from the next request on</td></tr>');
+  // prompt cache: a turn that reads nothing from cache on a long prompt is the
+  // whole prefix paid again, which is what backend fragmentation looks like
+  const cd=(s.cache||[]);const cT=cd.reduce((t,d)=>({r:t.r+d.requests,c:t.c+d.cold_requests,k:t.k+d.cache_read_tokens,fp:t.fp+d.full_price_tokens,w:t.w+d.waste_usd,sp:t.sp+d.cost_usd}),{r:0,c:0,k:0,fp:0,w:0,sp:0});
+  const hitAll=(cT.k+cT.fp)?100*cT.k/(cT.k+cT.fp):null;
+  document.getElementById('cache-sub').textContent=cT.r?`last 7 days · ${hitAll.toFixed(1)}% of prompt tokens from cache · ≈ $${f(cT.w,3)} lost on ${cT.c} cold turns, of $${f(cT.sp,2)} spent`:'last 7 days';
+  document.getElementById('cache-t').innerHTML='<tr><th>day</th><th class=n>req</th><th class=n>cold turns</th><th class=n>cache %</th><th class=n>full-price tok</th><th class=n>cost $</th><th class=n>≈ lost $</th><th class=n>≈ lost %</th></tr>'+
+    (cd.map(d=>{const hit=(d.cache_read_tokens+d.full_price_tokens)?100*d.cache_read_tokens/(d.cache_read_tokens+d.full_price_tokens):0;const lost=d.cost_usd?100*d.waste_usd/d.cost_usd:0;const cls=hit<80?'fail':hit<92?'warn':'pass';return `<tr><td>${esc(d.day)}</td><td class=n>${d.requests}</td><td class=n>${d.cold_requests}</td><td class="n ${cls}">${hit.toFixed(1)}</td><td class=n>${(d.full_price_tokens/1000).toFixed(0)}k</td><td class=n>${f(d.cost_usd,3)}</td><td class=n>${f(d.waste_usd,3)}</td><td class=n>${lost.toFixed(0)}</td></tr>`}).join('')||'<tr><td class=empty colspan=8>no proxied requests in the window</td></tr>');
   document.getElementById('anom-l').innerHTML=anoms.length?anoms.map(a=>`<li class=anom>${esc(a)}</li>`).join(''):'<li class=empty>none</li>';
   document.getElementById('audit-t').innerHTML='<tr><th>when</th><th>ip</th><th>key</th><th>outcome</th></tr>'+((s.audit||[]).map(a=>`<tr><td>${t(a.ts)}</td><td>${esc(a.ip)}</td><td class="tag">${esc(a.prefix)}</td><td class="${a.outcome==='revoked'?'warn':'fail'}">${esc(a.outcome)}</td></tr>`).join('')||'<tr><td class=empty colspan=4>no failed authentications</td></tr>');
   document.getElementById('events').innerHTML='<tr><th>day</th><th>tool</th><th>model</th><th class=n>req</th><th class=n>err</th><th class=n>bad edits</th><th class=n>retries</th><th class=n>prompt tok</th><th class=n>out tok</th><th class=n>cache</th><th class=n>est $</th><th class=n>lat s</th></tr>'+
@@ -642,6 +710,7 @@ mod tests {
             vec![],
             Month::default(),
             Facts::default(),
+            vec![],
             vec![],
             vec![],
         );
@@ -774,5 +843,62 @@ mod tests {
             .unwrap();
         assert!(s["usage"].as_array().unwrap().is_empty());
         assert!(s["anomalies"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cache_rows_group_by_day_and_price_the_cold_re_reads_with_each_tier() {
+        let cfg = cfg();
+        let fast = cfg.tiers.get("fast").unwrap().input_usd_per_m;
+        let days = vec![
+            CacheDay {
+                day: "2026-09-22".into(),
+                model: "m".into(),
+                tier: "fast".into(),
+                requests: 10,
+                cold_requests: 2,
+                cache_read_tokens: 900_000,
+                cold_prompt_tokens: 200_000,
+                full_price_tokens: 100_000,
+                cost_usd: 0.5,
+            },
+            CacheDay {
+                day: "2026-09-22".into(),
+                model: "other".into(),
+                tier: "nosuchtier".into(),
+                requests: 1,
+                cold_requests: 1,
+                cache_read_tokens: 0,
+                cold_prompt_tokens: 50_000,
+                full_price_tokens: 50_000,
+                cost_usd: 0.1,
+            },
+            CacheDay {
+                day: "2026-09-21".into(),
+                model: "m".into(),
+                tier: "fast".into(),
+                requests: 3,
+                cold_requests: 0,
+                cache_read_tokens: 300_000,
+                cold_prompt_tokens: 0,
+                full_price_tokens: 10_000,
+                cost_usd: 0.05,
+            },
+        ];
+        let rows = cache_rows(&cfg, &days);
+        assert_eq!(rows.len(), 2, "one row per day, order kept");
+        assert_eq!(rows[0].day, "2026-09-22");
+        assert_eq!(
+            (rows[0].requests, rows[0].cold_requests),
+            (11, 3),
+            "models of the same day are summed"
+        );
+        let expected = 200_000.0 / 1e6 * fast * 0.9;
+        assert!(
+            (rows[0].waste_usd - expected).abs() < 1e-12,
+            "the unknown tier prices at 0, the fast one at its own price: {} vs {expected}",
+            rows[0].waste_usd
+        );
+        assert_eq!(rows[1].cold_requests, 0);
+        assert_eq!(rows[1].waste_usd, 0.0, "nothing cold, nothing lost");
     }
 }

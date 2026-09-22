@@ -147,6 +147,10 @@ pub struct ModelStat {
     pub max_latency_ms: Option<i64>,
 }
 
+/// A request whose prompt is at least this long and which read *nothing* from
+/// cache is a prefix re-read from cold, not a new conversation. Claude Code's
+/// system prompt plus tools is already past it on the first turn.
+pub const COLD_PREFIX_TOKENS: i64 = 5000;
 /// Who served a model's traffic, per backend: the prompt cache lives there, so
 /// a low `cached` share means the requests are spread over several backends and
 /// the prefix is being paid again (docs/architecture/cache.md).
@@ -162,6 +166,25 @@ pub struct ProviderStat {
     pub cache_read_tokens: i64,
     pub cost_usd: f64,
     pub avg_latency_ms: Option<f64>,
+}
+
+/// One day × model of prompt-cache behaviour: how much of the prompt was
+/// served from cache and how much was a long prefix re-read from cold.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub struct CacheDay {
+    pub day: String,
+    pub model: String,
+    pub tier: String,
+    pub requests: i64,
+    /// Requests that re-read a long prefix from cold (see [`COLD_PREFIX_TOKENS`]).
+    pub cold_requests: i64,
+    pub cache_read_tokens: i64,
+    /// Prompt tokens of those cold requests: what a warm backend would have
+    /// charged at the cache-read price instead.
+    pub cold_prompt_tokens: i64,
+    /// Prompt tokens billed at full price on every request, cold or not.
+    pub full_price_tokens: i64,
+    pub cost_usd: f64,
 }
 /// `brain/auto` traffic per tier over a window: how many sessions the
 /// decision model sent there and what they cost.
@@ -722,6 +745,36 @@ impl Db {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Prompt-cache behaviour per UTC day × model over the last `days`.
+    /// Pair it with [`Db::provider_stats`]: this says how much is being re-read
+    /// from cold, that one says which backend did it.
+    pub fn cache_daily(&self, days: u32) -> Result<Vec<CacheDay>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT substr(ts, 1, 10) AS day, model, tier, COUNT(*),
+                    SUM(cache_read_tokens = 0 AND input_tokens + cache_write_tokens >= ?2),
+                    SUM(cache_read_tokens),
+                    SUM(CASE WHEN cache_read_tokens = 0 AND input_tokens + cache_write_tokens >= ?2
+                             THEN input_tokens + cache_write_tokens ELSE 0 END),
+                    SUM(input_tokens + cache_write_tokens), SUM(cost_usd)
+             FROM requests WHERE ts >= datetime('now', ?1) AND model != '' AND status < 400
+             GROUP BY day, model, tier ORDER BY day DESC, SUM(cost_usd) DESC",
+        )?;
+        let rows = stmt.query_map(params![format!("-{days} days"), COLD_PREFIX_TOKENS], |r| {
+            Ok(CacheDay {
+                day: r.get(0)?,
+                model: r.get(1)?,
+                tier: r.get(2)?,
+                requests: r.get(3)?,
+                cold_requests: r.get(4)?,
+                cache_read_tokens: r.get(5)?,
+                cold_prompt_tokens: r.get(6)?,
+                full_price_tokens: r.get(7)?,
+                cost_usd: r.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     /// (input+cache_write, cache_read, output) tokens and cost since `since`, all profiles.
     pub fn totals_since(&self, since: DateTime<Utc>) -> Result<(i64, i64, i64, f64)> {
         Ok(self.conn.query_row(
@@ -1153,6 +1206,27 @@ mod tests {
         );
         let bd = ps.iter().find(|p| p.provider == "Baidu").unwrap();
         assert_eq!((bd.requests, bd.cached_requests), (1, 0));
+        // cache_daily: a long prompt that read nothing from cache is a cold re-read;
+        // a short one is just a new conversation
+        for (cr, inp) in [
+            (0, COLD_PREFIX_TOKENS + 1),
+            (0, 10),
+            (120_000, 400),
+            (90_000, 700),
+        ] {
+            let mut x = row("dev", 0.03);
+            x.cache_read_tokens = cr;
+            x.input_tokens = inp;
+            db.insert_request(&x).unwrap();
+        }
+        let cds = db.cache_daily(1).unwrap();
+        let c = cds.iter().find(|c| c.model == "m").unwrap();
+        assert_eq!(
+            (c.cold_requests, c.cold_prompt_tokens),
+            (1, COLD_PREFIX_TOKENS + 1),
+            "only the long cold prompt counts, the 10-token one does not"
+        );
+        assert_eq!(c.cache_read_tokens, 210_000 + 900);
     }
 
     #[test]

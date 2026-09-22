@@ -99,11 +99,33 @@ and latency per backend.
 
 Pinning is the next step, not yet done: `provider.order` plus
 `allow_fallbacks` in the upstream body (OpenRouter has no sticky-session
-feature of its own). The measurement comes first, because if the
-fragmentation is *inside* one provider's fleet, pinning the provider is
-not enough. Price is a second reason to choose: across those 16 endpoints
+feature of its own). The measurement came first, and it says the scatter is between
+providers (see below), which is exactly what pinning addresses. Price is a second reason to choose: across those 16 endpoints
 input runs from $0.919 to $1.91 per M and cache reads from $0.0766 to
 $0.33 per M.
+
+### What the board shows (from v0.3.2)
+
+Two sections answer the question without a query. **Providers** lists who
+served each model, with the share of turns that reused the cache. **Prompt
+cache** turns it into money, per UTC day: requests, **cold turns** — a prompt
+of at least 5000 tokens that read *nothing* from cache, which is a prefix paid
+again rather than a new conversation — the share of prompt tokens served from
+cache, and an estimate of what those re-reads cost above the warm price (the
+tier's input price, cache reads at 0.1×; an estimate, not a billed figure).
+
+First 45 minutes after the cutover (2026-09-22T17:24Z):
+
+| model | backends | requests | prompt from cache | full price |
+|-------|----------|----------|-------------------|------------|
+| `deepseek-v4-pro` | 1 (StreamLake) | 9 | **100 %** | 0 |
+| `deepseek-v4-flash` | 4 (Baidu, StreamLake, OpenInference, DigitalOcean) | 47 | **69.6 %** | 1.13M tokens |
+
+So the fragmentation is **between providers**, at least on the model that
+scatters, which is what `provider.order` fixes. That `v4-pro` stayed on one
+backend for 45 minutes does not clear it — the cold turns measured the day
+before were on `v4-pro`, so the scatter is intermittent there and the pin is
+worth having on both.
 ## L2 — Gateway response cache
 
 Useful for apps (assistant FAQs, repeated classifications), **harmful for
