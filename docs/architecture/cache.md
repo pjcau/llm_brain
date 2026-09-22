@@ -127,6 +127,15 @@ scatters, which is what `provider.order` fixes. That `v4-pro` stayed on one
 backend for 45 minutes does not clear it — the cold turns measured the day
 before were on `v4-pro`, so the scatter is intermittent there and the pin is
 worth having on both.
+
+One caveat on that `v4-flash` row: at 17:54Z the `dev` profile crossed 70 %
+of its daily budget and the ring forced every request to the `fast` tier
+([budget](./budget.md)), so a live session's ~110k-token prefix moved from
+`v4-pro` to `v4-flash` and started cold there. Its 69.6 % therefore mixes
+backend fragmentation with one forced tier migration. What the migration
+does *not* explain is the count: four backends for one model, which is the
+part pinning addresses.
+
 ## L2 — Gateway response cache
 
 Useful for apps (assistant FAQs, repeated classifications), **harmful for
