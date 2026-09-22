@@ -110,7 +110,8 @@ flowchart TB
         L1b["OpenAI: automatic prefix cache"]
         L1c["Gemini: explicit context caching, with TTL and storage cost"]
         L1d["DeepSeek: automatic on-disk context cache"]
-        L1e["OpenRouter: pass-through to the underlying provider"]
+        L1e["OpenRouter: pass-through to the backend that serves the turn"]
+        L1f["⚠ one cache per backend: a turn on another backend re-reads the whole prefix"]
         L1n["Rule: stable prefix → system + tools + skills FIRST, variable content AFTER"]
     end
 
@@ -121,7 +122,7 @@ flowchart TB
     end
 
     REQ["Request"] --> L0 --> L2
-    L2 -- miss --> L1 --> PROV["Provider"]
+    L2 -- miss --> L1 --> PROV["Provider (pinned per session: next step)"]
     L3 -. "the app decides before calling llm_brain" .-> REQ
 ```
 

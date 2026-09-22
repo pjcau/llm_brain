@@ -28,7 +28,8 @@ flowchart TB
         L1b["OpenAI: automatic prefix cache"]
         L1c["Gemini: explicit context caching, with TTL and storage cost"]
         L1d["DeepSeek: automatic on-disk context cache"]
-        L1e["OpenRouter: pass-through to the underlying provider"]
+        L1e["OpenRouter: pass-through to the backend that serves the turn"]
+        L1f["⚠ one cache per backend: a turn on another backend re-reads the whole prefix"]
         L1n["Rule: stable prefix → system + tools + skills FIRST, variable content AFTER"]
     end
 
@@ -39,7 +40,7 @@ flowchart TB
     end
 
     REQ["Request"] --> L0 --> L2
-    L2 -- miss --> L1 --> PROV["Provider"]
+    L2 -- miss --> L1 --> PROV["Provider (pinned per session: next step)"]
     L3 -. "the app decides before calling llm_brain" .-> REQ
 ```
 
@@ -60,7 +61,7 @@ does it its own way:
 | OpenAI | automatic prefix cache |
 | DeepSeek | automatic on-disk context cache |
 | Gemini | explicit context caching, with TTL and storage cost |
-| OpenRouter | pass-through to the underlying provider (to verify per model) |
+| OpenRouter | pass-through to the backend serving the turn — verified 2026-09-22; the backend can change between turns, see below |
 | Local (vLLM / llama.cpp) | prefix cache / KV cache: `none` strategy on the layer side |
 
 The translator must: accept hints in both dialects, translate or drop
@@ -68,6 +69,41 @@ them, **never reorder the prefix** (system, tools, skills first; variable
 content after), and report cache hits in usage. If this piece is wrong,
 Claude Code behind the proxy costs double.
 
+
+### Which backend serves the turn (2026-09-22)
+
+OpenRouter is not one cache. A model is served by many endpoints —
+`deepseek-v4-pro` has 16 — and **the prompt cache lives in the backend
+that served the turn**, so a turn that lands somewhere the prefix has
+never been pays the whole history at full price.
+
+Measured on one live `px-claude` session (dev, 203 requests, $2.44):
+
+| turn | input | cache read | cost |
+|------|-------|------------|------|
+| warm | ~2.000 | ~114.000 | **$0.011** |
+| cold | ~112.000 | 0 | **$0.102** |
+
+Ten of its last 28 turns were cold — **~$0.91 in ten minutes** — and warm
+and cold alternate within seconds on a prefix that only grows, which is
+what a turn changing backend looks like rather than a TTL expiring. Two
+identical probe requests confirmed it directly: `StreamLake`, then
+`SiliconFlow`.
+
+OpenRouter names the backend in `provider`: at the top level of a
+non-streamed body and of an OpenAI chunk, and inside `message` in an
+Anthropic `message_start`. The proxy reads it in both dialects, streamed
+or not, and stores it on the request row; the board's **Providers** table
+shows requests, cache-hit share, prompt tokens paid at full price, cost
+and latency per backend.
+
+Pinning is the next step, not yet done: `provider.order` plus
+`allow_fallbacks` in the upstream body (OpenRouter has no sticky-session
+feature of its own). The measurement comes first, because if the
+fragmentation is *inside* one provider's fleet, pinning the provider is
+not enough. Price is a second reason to choose: across those 16 endpoints
+input runs from $0.919 to $1.91 per M and cache reads from $0.0766 to
+$0.33 per M.
 ## L2 — Gateway response cache
 
 Useful for apps (assistant FAQs, repeated classifications), **harmful for

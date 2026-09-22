@@ -925,6 +925,7 @@ fn rejection(
         cost_usd: 0.0,
         latency_ms: started.elapsed().as_millis() as i64,
         stream: false,
+        provider: String::new(),
         degraded: reason.to_string(),
     }
 }
@@ -969,6 +970,7 @@ fn row(
         cost_usd: cost,
         latency_ms: started.elapsed().as_millis() as i64,
         stream,
+        provider: usage.provider.clone().unwrap_or_default(),
         degraded: degraded.to_string(),
     }
 }
@@ -1066,7 +1068,7 @@ mod tests {
         for _ in 0..50 {
             let rows: Vec<RequestRow> = {
                 let db = Db::open(db_path).unwrap();
-                let mut stmt = db.conn_for_tests().prepare("SELECT profile, model, status, input_tokens, output_tokens, cost_usd, stream, degraded, user, tier FROM requests ORDER BY id").unwrap();
+                let mut stmt = db.conn_for_tests().prepare("SELECT profile, model, status, input_tokens, output_tokens, cost_usd, stream, degraded, user, tier, provider FROM requests ORDER BY id").unwrap();
                 stmt.query_map([], |r| {
                     Ok(RequestRow {
                         ts: Utc::now(),
@@ -1084,6 +1086,7 @@ mod tests {
                         cost_usd: r.get(5)?,
                         latency_ms: 0,
                         stream: r.get::<_, i32>(6)? != 0,
+                        provider: r.get(10)?,
                         degraded: r.get(7)?,
                     })
                 })
@@ -1202,7 +1205,7 @@ mod tests {
             .and(path("/chat/completions"))
             .and(bearer_token("sk-or-dev"))
             .and(body_partial_json(json!({"model": "deepseek/deepseek-v4-flash", "models": ["deepseek/deepseek-v4-flash", "qwen/qwen3.7-flash"], "usage": {"include": true}, "user": "u_7"})))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "gen-1", "model": "deepseek/deepseek-v4-flash", "choices": [{"message": {"role": "assistant", "content": "pong"}}], "usage": {"prompt_tokens": 100, "completion_tokens": 10, "cost": 0.0005}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "gen-1", "model": "deepseek/deepseek-v4-flash", "provider": "StreamLake", "choices": [{"message": {"role": "assistant", "content": "pong"}}], "usage": {"prompt_tokens": 100, "completion_tokens": 10, "cost": 0.0005}})))
             .expect(1)
             .mount(&h.upstream)
             .await;
@@ -1227,13 +1230,17 @@ mod tests {
         );
         assert_eq!(rows[0].user, "u_7");
         assert!(!rows[0].stream);
+        assert_eq!(
+            rows[0].provider, "StreamLake",
+            "which backend served it: the prompt cache lives there"
+        );
     }
 
     #[tokio::test]
     async fn anthropic_stream_is_passed_through_sanitized_and_usage_recorded_at_the_end() {
         let h = harness(Limits::default()).await;
         let key = issue(&h.db_path, "dev", "cc", "");
-        let sse = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":40,\"cache_read_input_tokens\":30,\"output_tokens\":1}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"pong\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":17}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let sse = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"provider\":\"Baidu\",\"usage\":{\"input_tokens\":40,\"cache_read_input_tokens\":30,\"output_tokens\":1}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"pong\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":17}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
         Mock::given(method("POST"))
             .and(path("/messages"))
             .and(header("anthropic-version", "2023-06-01"))
@@ -1283,6 +1290,7 @@ mod tests {
             rows[0].degraded
         );
         assert_eq!(rows[0].user, "cc:sess-1234567");
+        assert_eq!(rows[0].provider, "Baidu", "read from message_start");
         let expected = ((40.0 + 30.0 * 0.25) / 1e6) * 0.04 + 17.0 / 1e6 * 0.08;
         assert!(
             (rows[0].cost_usd - expected).abs() < 1e-15,
@@ -1319,6 +1327,7 @@ mod tests {
                 cost_usd: usd,
                 latency_ms: 0,
                 stream: false,
+                provider: String::new(),
                 degraded: String::new(),
             })
             .unwrap();

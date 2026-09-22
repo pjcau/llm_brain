@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "in=$(cat); [ \"$(printf \"%s\" \"$in\" | jq -r \".stop_hook_active // false\")\" = \"true\" ] && exit 0; d=${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null)}; [ -n \"$d\" ] || exit 0; c=$(git -C \"$d\" status --porcelain -- crates config diagrams tools deploy 2>/dev/null); [ -z \"$c\" ] && exit 0; [ -n \"$(git -C \"$d\" status --porcelain -- docs 2>/dev/null)\" ] && exit 0; jq -nc --arg files \"$c\" \"{decision:\\\"block\\\",reason:(\\\"Code changed but nothing under docs/ moved with it:\\n\\\" + \\$files + \\\"\\nRun the sync-docs skill (Skill tool, skill: sync-docs): changelog row, affected pages, diagrams via diagrams/*.mmd + npm run sync-diagrams, then npm run build. If this change really needs no documentation, say so and commit — the check looks for an uncommitted docs/ edit.\\\")}\"",
+            "timeout": 15,
+            "statusMessage": "checking docs moved with the code"
+          }
+        ]
+      }
+    ]
+  }
+}

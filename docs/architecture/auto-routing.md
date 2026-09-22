@@ -127,6 +127,25 @@ cheap rungs. The cases this misses — a session that starts light and turns
 heavy — are for escalation on failure (Phase 2) or `/model brain/agent` by
 hand.
 
+Measured on 2026-09-22, on a live `px-claude` session whose prefix had
+grown to ~110k tokens (tier prices from `tiers.yaml`):
+
+| | cost |
+|---|---|
+| a turn on `agent` with the cache warm | **$0.011** — 93 % of it is re-reading the history; the turn's own new input and output are $0.0006 |
+| the first turn after moving down to `medium` | **$0.017** (the whole prefix read at $0.15/M), then ~$0.002 per turn |
+| the first turn back up on `agent` | **$0.108** (the whole prefix read at $0.96/M, cold backend) |
+
+A round trip therefore pays for itself only after **~15 consecutive turns**
+on the cheap rung, and a per-turn router does not produce blocks of 15: on
+that 203-request session, alternating would have cost several times its
+$2.44. What dominates is the cold *return*, and that is a backend-affinity
+problem, not a routing one — see [cache layers](./cache.md). With the
+prefix still warm on the way back, the break-even falls to about two
+turns and re-deciding per **task** (a new human message, not a tool
+result) becomes worth doing. Order of work: pin the backend first, then
+revisit the granularity.
+
 ## Alternatives checked
 
 | | Decides where | Latency | Ladder is ours | Session stickiness | Verdict |

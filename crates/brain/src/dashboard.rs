@@ -5,8 +5,8 @@
 
 use crate::config::Config;
 use crate::db::{
-    AuditRow, AutoTier, BenchRun, DailyRequests, DailyUsage, DaySpend, Db, ModelStat, RecentRow,
-    SessionRow, TodayProfile,
+    AuditRow, AutoTier, BenchRun, DailyRequests, DailyUsage, DaySpend, Db, ModelStat, ProviderStat,
+    RecentRow, SessionRow, TodayProfile,
 };
 use crate::events::{DailyStat, anomalies};
 use axum::{Router, extract::State, response::Html, routing::get};
@@ -66,6 +66,9 @@ pub struct Summary {
     pub auto: Vec<AutoRow>,
     /// The tier `auto.baseline_cost_usd` is computed against.
     pub auto_baseline: Option<String>,
+    /// Who actually served each model over the window: one row per backend, with
+    /// the share of turns that reused the prompt cache.
+    pub providers: Vec<ProviderStat>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -185,6 +188,7 @@ pub fn summary(
     month: Month,
     facts: Facts,
     auto: Vec<AutoTier>,
+    providers: Vec<ProviderStat>,
 ) -> Summary {
     let (auto, auto_baseline) = auto_rows(cfg, &auto);
     let usage = usage
@@ -259,6 +263,7 @@ pub fn summary(
         auth_failures_last_hour: 0,
         auto,
         auto_baseline,
+        providers,
     }
 }
 
@@ -362,6 +367,7 @@ fn load(state: &AppState) -> anyhow::Result<Summary> {
         },
         state.facts.lock().unwrap().clone(),
         db.auto_routed(state.days)?,
+        db.provider_stats(state.days)?,
     );
     s.auth_failures_last_hour = failures;
     Ok(s)
@@ -438,7 +444,7 @@ ul{margin:0;padding-left:18px}
 </style></head><body>
 <header><h1>llm_brain</h1><span id="ts">loading…</span><span>auto-refresh 30 s</span>
 <span class="seg" id="theme" title="theme"><button data-t="auto">auto</button><button data-t="light">light</button><button data-t="dark">dark</button></span>
-<nav><a href="#kpi">month</a><a href="#budget">budget</a><a href="#spend">spend</a><a href="#models">models</a><a href="#sessions">sessions</a><a href="#proxy">proxy</a><a href="#recent">live</a><a href="#anom">anomalies</a><a href="#audit">auth</a><a href="#bench">bench</a></nav></header>
+<nav><a href="#kpi">month</a><a href="#budget">budget</a><a href="#spend">spend</a><a href="#models">models</a><a href="#providers">providers</a><a href="#sessions">sessions</a><a href="#proxy">proxy</a><a href="#recent">live</a><a href="#anom">anomalies</a><a href="#audit">auth</a><a href="#bench">bench</a></nav></header>
 <main>
 <section id="kpi"><h2>Month <small id="kpi-sub"></small></h2><div class="kpis" id="kpis"></div></section>
 <section id="budget"><h2>Budget · today per profile <small id="budget-sub"></small></h2><div class="cards" id="usage"></div></section>
@@ -446,6 +452,7 @@ ul{margin:0;padding-left:18px}
 <section id="reqs"><h2>Requests per day · ok / upstream errors / refused</h2><div class="viz"><svg class="chart" id="req-chart" role="img" aria-label="Daily requests by outcome"></svg><div class="legend" id="req-legend"></div></div></section>
 <section id="models"><h2>Models · quality and cost <small>last 7 days</small></h2><div class="tw"><table id="models-t"></table></div></section>
 <section id="auto"><h2>Auto routing · brain/auto <small id="auto-sub">per-session decision, last 7 days</small></h2><div class="tw"><table id="auto-t"></table></div></section>
+<section id="providers"><h2>Providers · who serves, and where the cache lives <small id="prov-sub">last 7 days</small></h2><div class="tw"><table id="prov-t"></table></div></section>
 <section id="health"><h2>Health</h2><div class="health" id="health-l"></div></section>
 <section id="sessions"><h2>Sessions · profile × user <small>last 7 days, proxy only</small></h2><div class="tw"><table id="sessions-t"></table></div></section>
 <section id="proxy"><h2>Proxy · day × profile × model <small>exact, from the proxy</small></h2><div class="tw"><table id="proxied"></table></div></section>
@@ -526,6 +533,12 @@ async function load(){
   document.getElementById('auto-sub').textContent=base?`per-session decision by the decision model · last 7 days · ${aTot.n} sessions · $${f(aTot.c,3)} vs ≈ $${f(aTot.b,3)} had they all gone to ${base}`:'no router configured';
   document.getElementById('auto-t').innerHTML=`<tr><th>tier</th><th>model</th><th class=n>sessions</th><th class=n>req</th><th class=n>cost $</th><th class=n>on ${esc(base||'baseline')} ≈ $</th></tr>`+
     ((s.auto||[]).map(a=>`<tr><td>${esc(a.tier)}</td><td class="tag">${esc(a.model)}</td><td class=n>${a.sessions}</td><td class=n>${a.requests}</td><td class=n>${f(a.cost_usd,4)}</td><td class=n>${a.baseline_cost_usd==null?'-':f(a.baseline_cost_usd,4)}</td></tr>`).join('')||'<tr><td class=empty colspan=6>no brain/auto traffic yet — run px-claude</td></tr>');
+  // providers: the prompt cache lives in the backend that served the turn, so a
+  // model spread over several of them pays its prefix again on each new one
+  const pv=(s.providers||[]);const pT=pv.reduce((t,p)=>({r:t.r+p.requests,c:t.c+p.cached_requests,u:t.u+p.uncached_prompt_tokens}),{r:0,c:0,u:0});
+  document.getElementById('prov-sub').textContent=pT.r?`last 7 days · ${pv.length} backends · ${(100*pT.c/pT.r).toFixed(0)}% of turns reused the cache · ${(pT.u/1e6).toFixed(2)}M prompt tokens paid at full price`:'last 7 days';
+  document.getElementById('prov-t').innerHTML='<tr><th>model</th><th>provider</th><th class=n>req</th><th class=n>cache hit %</th><th class=n>full-price prompt tok</th><th class=n>cached tok</th><th class=n>cost $</th><th class=n>lat s</th></tr>'+
+    (pv.map(p=>{const hit=p.requests?100*p.cached_requests/p.requests:0;const cls=hit<50?'fail':hit<90?'warn':'pass';return `<tr><td class="tag">${esc(p.model)}</td><td>${esc(p.provider)}</td><td class=n>${p.requests}</td><td class="n ${cls}">${hit.toFixed(0)}</td><td class=n>${(p.uncached_prompt_tokens/1000).toFixed(0)}k</td><td class=n>${(p.cache_read_tokens/1000).toFixed(0)}k</td><td class=n>${f(p.cost_usd,4)}</td><td class=n>${f((p.avg_latency_ms||0)/1000,1)}</td></tr>`}).join('')||'<tr><td class=empty colspan=8>no provider recorded yet — rows are filled from the next request on</td></tr>');
   document.getElementById('anom-l').innerHTML=anoms.length?anoms.map(a=>`<li class=anom>${esc(a)}</li>`).join(''):'<li class=empty>none</li>';
   document.getElementById('audit-t').innerHTML='<tr><th>when</th><th>ip</th><th>key</th><th>outcome</th></tr>'+((s.audit||[]).map(a=>`<tr><td>${t(a.ts)}</td><td>${esc(a.ip)}</td><td class="tag">${esc(a.prefix)}</td><td class="${a.outcome==='revoked'?'warn':'fail'}">${esc(a.outcome)}</td></tr>`).join('')||'<tr><td class=empty colspan=4>no failed authentications</td></tr>');
   document.getElementById('events').innerHTML='<tr><th>day</th><th>tool</th><th>model</th><th class=n>req</th><th class=n>err</th><th class=n>bad edits</th><th class=n>retries</th><th class=n>prompt tok</th><th class=n>out tok</th><th class=n>cache</th><th class=n>est $</th><th class=n>lat s</th></tr>'+
@@ -629,6 +642,7 @@ mod tests {
             vec![],
             Month::default(),
             Facts::default(),
+            vec![],
             vec![],
         );
         assert_eq!(s.usage[0].state, "degrade-fast");

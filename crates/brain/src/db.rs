@@ -58,6 +58,8 @@ pub struct RequestRow {
     pub cost_usd: f64,
     pub latency_ms: i64,
     pub stream: bool,
+    /// Backend that actually served it (OpenRouter's `provider`), "" when unknown.
+    pub provider: String,
     /// "" | "fast-only" | "max-tokens" | "blocked"
     pub degraded: String,
 }
@@ -145,6 +147,22 @@ pub struct ModelStat {
     pub max_latency_ms: Option<i64>,
 }
 
+/// Who served a model's traffic, per backend: the prompt cache lives there, so
+/// a low `cached` share means the requests are spread over several backends and
+/// the prefix is being paid again (docs/architecture/cache.md).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub struct ProviderStat {
+    pub model: String,
+    pub provider: String,
+    pub requests: i64,
+    /// Requests that read something from the prompt cache.
+    pub cached_requests: i64,
+    /// Prompt tokens paid at full price (no cache read on that request).
+    pub uncached_prompt_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cost_usd: f64,
+    pub avg_latency_ms: Option<f64>,
+}
 /// `brain/auto` traffic per tier over a window: how many sessions the
 /// decision model sent there and what they cost.
 #[derive(Debug, Clone, PartialEq)]
@@ -281,6 +299,7 @@ CREATE TABLE IF NOT EXISTS requests (
   cost_usd REAL NOT NULL DEFAULT 0,
   latency_ms INTEGER NOT NULL DEFAULT 0,
   stream INTEGER NOT NULL DEFAULT 0,
+  provider TEXT NOT NULL DEFAULT '',
   degraded TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS requests_profile_ts ON requests(profile, ts);
@@ -307,6 +326,15 @@ impl Db {
             .exists([])?;
         if !has_latency {
             conn.execute_batch("ALTER TABLE events ADD COLUMN latency_ms INTEGER")?;
+        }
+        // migration for databases created before provider existed
+        let has_provider: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name = 'provider'")?
+            .exists([])?;
+        if !has_provider {
+            conn.execute_batch(
+                "ALTER TABLE requests ADD COLUMN provider TEXT NOT NULL DEFAULT ''",
+            )?;
         }
         Ok(Self { conn })
     }
@@ -514,8 +542,8 @@ impl Db {
     pub fn insert_request(&self, r: &RequestRow) -> Result<()> {
         self.conn.execute(
             "INSERT INTO requests (ts, profile, key_prefix, user, dialect, tier, model, status, input_tokens, cache_read_tokens,
-                                   cache_write_tokens, output_tokens, cost_usd, latency_ms, stream, degraded)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                                   cache_write_tokens, output_tokens, cost_usd, latency_ms, stream, provider, degraded)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 r.ts.to_rfc3339(),
                 r.profile,
@@ -532,6 +560,7 @@ impl Db {
                 r.cost_usd,
                 r.latency_ms,
                 r.stream as i32,
+                r.provider,
                 r.degraded
             ],
         )?;
@@ -662,6 +691,32 @@ impl Db {
                 cache_read_tokens: r.get(4)?,
                 output_tokens: r.get(5)?,
                 cost_usd: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Who served each model over the last `days`, per backend. `cached_requests`
+    /// against `requests` says whether the prompt cache is being reused: requests
+    /// spread over several backends pay the prefix again on each new one.
+    pub fn provider_stats(&self, days: u32) -> Result<Vec<ProviderStat>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT model, provider, COUNT(*), SUM(cache_read_tokens > 0),
+                    SUM(CASE WHEN cache_read_tokens = 0 THEN input_tokens + cache_write_tokens ELSE 0 END),
+                    SUM(cache_read_tokens), SUM(cost_usd), AVG(latency_ms)
+             FROM requests WHERE ts >= date('now', ?1) AND provider != '' AND status < 400
+             GROUP BY model, provider ORDER BY SUM(cost_usd) DESC",
+        )?;
+        let rows = stmt.query_map(params![format!("-{days} days")], |r| {
+            Ok(ProviderStat {
+                model: r.get(0)?,
+                provider: r.get(1)?,
+                requests: r.get(2)?,
+                cached_requests: r.get(3)?,
+                uncached_prompt_tokens: r.get(4)?,
+                cache_read_tokens: r.get(5)?,
+                cost_usd: r.get(6)?,
+                avg_latency_ms: r.get(7)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -967,6 +1022,7 @@ mod tests {
             cost_usd: cost,
             latency_ms: 100,
             stream: false,
+            provider: String::new(),
             degraded: String::new(),
         };
         db.insert_request(&row("dev", 0.5)).unwrap();
@@ -1077,6 +1133,26 @@ mod tests {
         let recent = db.recent_requests(3).unwrap();
         assert_eq!(recent.len(), 3);
         assert_eq!(recent[0].degraded, "auto:agent:decided", "newest first");
+        // provider: same model, two backends, only one of them with a warm cache
+        for (prov, cr) in [("StreamLake", 0), ("StreamLake", 900), ("Baidu", 0)] {
+            let mut p = row("dev", 0.01);
+            p.provider = prov.into();
+            p.cache_read_tokens = cr;
+            db.insert_request(&p).unwrap();
+        }
+        let ps = db.provider_stats(1).unwrap();
+        assert_eq!(ps.len(), 2, "rows with no provider are left out");
+        let sl = ps.iter().find(|p| p.provider == "StreamLake").unwrap();
+        assert_eq!(
+            (sl.requests, sl.cached_requests, sl.cache_read_tokens),
+            (2, 1, 900)
+        );
+        assert_eq!(
+            sl.uncached_prompt_tokens, 10,
+            "only the turn that read nothing from the cache"
+        );
+        let bd = ps.iter().find(|p| p.provider == "Baidu").unwrap();
+        assert_eq!((bd.requests, bd.cached_requests), (1, 0));
     }
 
     #[test]
