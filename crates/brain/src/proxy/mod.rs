@@ -258,6 +258,10 @@ impl ProxyState {
     }
 
     /// The full auth chain. `Err` is a ready-to-send response.
+    // The `Err` variant is an axum `Response` on purpose: the caller sends it as is,
+    // it never propagates up a `?` chain, and boxing it would allocate on every
+    // rejected request. clippy 1.98 flags its size; that is the design.
+    #[allow(clippy::result_large_err)]
     async fn authenticate(
         &self,
         dialect: Dialect,
