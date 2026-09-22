@@ -280,10 +280,11 @@ impl DailyStat {
     }
     /// Estimated cost from the tier prices when the model is a configured tier model.
     pub fn est_cost(&self, cfg: &Config) -> Option<f64> {
-        let tier = cfg
-            .tiers
-            .values()
-            .find(|t| t.model.as_deref().is_some_and(|m| self.model.ends_with(m)))?;
+        let tier = cfg.tiers.values().find(|t| {
+            t.model
+                .as_deref()
+                .is_some_and(|m| crate::catalog::base_id(&self.model).ends_with(m))
+        })?;
         let input = (self.input_tokens + self.cache_write_tokens) as f64
             + self.cache_read_tokens as f64 * 0.25;
         Some(
@@ -671,6 +672,12 @@ pong
         let expected =
             ((10_000.0 + 50_000.0) + 900_000.0 * 0.25) / 1e6 * 0.075 + 5_000.0 / 1e6 * 0.5;
         assert!((c - expected).abs() < 1e-9);
+        // a routing variant of a tier model is priced as that tier
+        let exacto = DailyStat {
+            model: format!("{}:exacto", good.model),
+            ..good.clone()
+        };
+        assert_eq!(exacto.est_cost(&cfg()), Some(c));
         let r = render_report(&cfg(), &[good]);
         assert!(r.contains("94%"), "{r}");
         assert!(render_report(&cfg(), &[]).contains("no events yet"));
@@ -694,11 +701,17 @@ pong
         assert_eq!(ingest(&db, &paths).unwrap(), 6, "5 aider events + 1 claude");
         assert_eq!(ingest(&db, &paths).unwrap(), 0, "nothing new");
         // append to both files: only the new lines are read, model hint kept
+        // (a new session without a Model line; dated so the stat lands on the
+        // same day as the fixture instead of on "today")
         let mut f = std::fs::OpenOptions::new()
             .append(true)
             .open(&aider)
             .unwrap();
-        std::io::Write::write_all(&mut f, b"> Tokens: 5 sent, 1 received.\n").unwrap();
+        std::io::Write::write_all(
+            &mut f,
+            b"\n# aider chat started at 2026-09-20 10:00:00\n\n> Tokens: 5 sent, 1 received.\n",
+        )
+        .unwrap();
         let mut g = std::fs::OpenOptions::new()
             .append(true)
             .open(&sess)

@@ -1,15 +1,18 @@
-# Tiers, not models. Models are OpenRouter ids; prices checked on 2026-09-19/20.
+# Tiers, not models. Models are OpenRouter ids; prices are the catalog's
+# (GET /api/v1/models), checked on 2026-09-22 — they moved ~2x since 2026-09-20.
 # Decided 2026-09-20 from the first benchmark rows:
-#   fast:      deepseek-v4-flash $0.04/M in · $0.08/M out — solved ago-0001 with aider (260 s, $0.004)
+#   fast:      deepseek-v4-flash $0.09/M in · $0.18/M out — solved ago-0001 with aider (260 s, $0.004)
 #   reasoning: bonsai-2-27b     $0.075 / $0.5             — reasoning model, single slow provider, no prompt cache:
-#              fine as the architect/reasoning role, not as the daily driver; fallback deepseek-v4-pro $0.42 / $0.84
+#              fine as the architect/reasoning role, not as the daily driver; fallback deepseek-v4-pro $0.96 / $1.91
+# A model id may carry an OpenRouter variant suffix (`:exacto` = providers
+# sorted by measured tool-call accuracy); the catalog lookup strips it.
 tiers:
   fast:
     model: deepseek/deepseek-v4-flash
     fallback: qwen/qwen3.7-flash
     context: 1048576
-    input_usd_per_m: 0.04
-    output_usd_per_m: 0.08
+    input_usd_per_m: 0.09
+    output_usd_per_m: 0.18
     max_output_tokens: 16384     # policy cap; the provider's own max comes from the OpenRouter catalog
   reasoning:
     model: prism-ml/ternary-bonsai-2-27b
@@ -19,11 +22,11 @@ tiers:
     output_usd_per_m: 0.5
     max_output_tokens: 32768
   agent:                              # Claude Code's main model through the proxy: reliable tool loop
-    model: deepseek/deepseek-v4-pro     # $0.42 / $0.85 per M, 1M context, several providers
+    model: deepseek/deepseek-v4-pro     # $0.96 / $1.91 per M, 1M context, 16 providers (Auto Exacto sorts them on tool calls)
     fallback: qwen/qwen3.7-plus
     context: 1048576
-    input_usd_per_m: 0.42
-    output_usd_per_m: 0.85
+    input_usd_per_m: 0.96
+    output_usd_per_m: 1.91
     max_output_tokens: 32768
   premium:
     model: null

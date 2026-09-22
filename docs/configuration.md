@@ -69,13 +69,13 @@ profiles:
     l2_cache: off
   - name: assistant    # local assistant app
     tier: fast
-    daily_limit_usd: 0.2
-    monthly_soft_usd: 3.0
+    daily_limit_usd: 0.5
+    monthly_soft_usd: 15.0
     l2_cache: exact
   - name: car          # find-a-car
     tier: fast
-    daily_limit_usd: 0.2
-    monthly_soft_usd: 3.0
+    daily_limit_usd: 0.5
+    monthly_soft_usd: 15.0
     l2_cache: exact
 ```
 
@@ -83,21 +83,34 @@ profiles:
 
 ```yaml
 tiers:
-  fast:                                   # daily driver, editor role in aider
+  fast:                                   # daily driver, editor role in aider, Claude Code's "haiku" role
     model: deepseek/deepseek-v4-flash
     fallback: qwen/qwen3.7-flash
     context: 1048576
-    input_usd_per_m: 0.04
-    output_usd_per_m: 0.08
+    input_usd_per_m: 0.09
+    output_usd_per_m: 0.18
   reasoning:                              # architect role in aider, /model in Claude Code
     model: prism-ml/ternary-bonsai-2-27b
     fallback: deepseek/deepseek-v4-pro
     context: 262144
     input_usd_per_m: 0.075
     output_usd_per_m: 0.5
+  agent:                                  # Claude Code's main model through the proxy
+    model: deepseek/deepseek-v4-pro       # `deepseek/deepseek-v4-pro:exacto` to force provider sorting by tool-call accuracy
+    fallback: qwen/qwen3.7-plus
+    context: 1048576
+    input_usd_per_m: 0.96
+    output_usd_per_m: 1.91
   premium:
     model: null
 ```
+
+Prices are the OpenRouter catalog's, re-checked 2026-09-22 (they moved
+~2× since 2026-09-20); the proxy bills from OpenRouter's `cost` when
+present and only estimates from these numbers otherwise. A model id may
+carry an OpenRouter routing suffix (`:exacto`, `:nitro`, `:floor`); the
+catalog lookup (max output tokens, prices) strips it. See
+[Provider routing](./architecture/api-layer.md#provider-routing-exacto).
 
 ### `.env` (from `.env.example`)
 

@@ -99,7 +99,7 @@ place — the secret does not change).
 | `dev` (Claude Code + aider) | **5.00** (was 3.00 until 2026-09-20) | **60** (was 30) | degradation at 70% of either window: `agent`/`reasoning` requests go to `fast` |
 | `ago` (agent-orchestrator) | 1.00 | 5 | same tier as `dev`, separate budget |
 | `benchmark` | 0.50 | 5 | separate key, never at the expense of dev |
-| `assistant` + `car` | 0.20 | 3 | almost only `fast` |
+| `assistant` + `car` | **0.50** each (was 0.20 until 2026-09-22) | **15** each (was 3) | almost only `fast`; the monthly soft is the real ceiling, the daily one is the safety net |
 | `market` (later) | — | — | when it joins |
 | **Hard monthly ceiling (tokens)** | | **≈ 40** | = fixed monthly top-up of OpenRouter credits |
 | Hosting (outside OpenRouter) | | 5–15 | VPS or AWS, see [Hosting](../analysis/hosting-costs.md) |

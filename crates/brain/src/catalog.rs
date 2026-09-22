@@ -103,8 +103,20 @@ impl Catalog {
         self.fetched_at.elapsed() > TTL
     }
 
+    /// Facts for `id`. A routing variant (`model:exacto`, `:nitro`, `:floor`)
+    /// is not a catalog entry — it selects providers of the base model — so
+    /// it falls back to the base id. `:free` and `:batch` are real entries
+    /// with their own prices and are matched exactly first.
     pub fn get(&self, id: &str) -> Option<&ModelInfo> {
-        self.models.get(id)
+        self.models.get(id).or_else(|| self.models.get(base_id(id)))
+    }
+}
+
+/// `deepseek/deepseek-v4-pro:exacto` → `deepseek/deepseek-v4-pro`.
+pub fn base_id(id: &str) -> &str {
+    match id.rsplit_once(':') {
+        Some((base, variant)) if base.contains('/') && !variant.is_empty() => base,
+        _ => id,
     }
 }
 
@@ -126,6 +138,7 @@ mod tests {
     const JSON: &str = r#"{"data":[
       {"id":"deepseek/deepseek-v4-flash","context_length":1048576,"pricing":{"prompt":"0.000000036","completion":"0.000000073"},"top_provider":{"context_length":1048576,"max_completion_tokens":131072},"supported_parameters":["tools","reasoning","max_tokens"]},
       {"id":"prism-ml/ternary-bonsai-2-27b","context_length":262144,"pricing":{"prompt":"0.000000075","completion":"0.0000005"},"top_provider":{"max_completion_tokens":32768},"supported_parameters":["tools","reasoning"]},
+      {"id":"deepseek/deepseek-v4-flash:free","context_length":65536,"pricing":{"prompt":"0","completion":"0"},"top_provider":{"max_completion_tokens":8192},"supported_parameters":["tools"]},
       {"id":"some/odd-model","pricing":{"prompt":"0","completion":"0"}}
     ]}"#;
 
@@ -152,6 +165,27 @@ mod tests {
             (None, None, false)
         );
         assert!(!c.is_stale());
+    }
+
+    #[test]
+    fn routing_variants_fall_back_to_the_base_model() {
+        let c = Catalog::parse(JSON).unwrap();
+        assert_eq!(
+            c.get("deepseek/deepseek-v4-flash:exacto")
+                .map(|m| m.id.as_str()),
+            Some("deepseek/deepseek-v4-flash")
+        );
+        assert_eq!(
+            c.get("deepseek/deepseek-v4-flash:free")
+                .map(|m| m.id.as_str()),
+            Some("deepseek/deepseek-v4-flash:free"),
+            "a real variant entry wins over the base"
+        );
+        assert!(c.get("nobody/here:exacto").is_none());
+        assert_eq!(base_id("a/b:exacto"), "a/b");
+        assert_eq!(base_id("a/b"), "a/b");
+        assert_eq!(base_id("a/b:"), "a/b:");
+        assert_eq!(base_id("noslash:exacto"), "noslash:exacto");
     }
 
     #[test]
@@ -182,6 +216,6 @@ mod tests {
         let c = Catalog::fetch(&reqwest::Client::new(), &server.uri())
             .await
             .unwrap();
-        assert_eq!(c.models.len(), 3);
+        assert_eq!(c.models.len(), 4);
     }
 }

@@ -43,7 +43,7 @@ Second finding (2026-09-20, real aider session): `Provider returned error`
 with 4 retries on a large architect request, while six small probes passed
 in 1.4 s each — the single provider degrades under size/load. Mitigation
 in place: OpenRouter `models[]` fallback to deepseek-v4-pro
-([configuration](../configuration.md#aider-model-fallbacks-openrouter-models)).
+([configuration](../configuration.md#aider-model-fallbacks-and-edit-formats-aidermodelsettingsyml)).
 
 Confirmed by benchmark (2026-09-20): architect bonsai + editor
 deepseek-v4-flash in `diff` format, fallback on → `ago-0001` **PASS in 74 s**.

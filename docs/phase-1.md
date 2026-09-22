@@ -66,7 +66,9 @@ Rate limits: 60 req/min per key, 10 req/min per (key, end user); 20 auth
 failures in 10 minutes block the IP for the window. Ring 1 (the
 OpenRouter key's own daily limit) still holds if all of this fails.
 
-## Agents compared through the proxy (2026-09-20, task `ago-0001`, model deepseek-v4-pro via `brain/agent`)
+## Agents compared through the proxy
+
+2026-09-20, task `ago-0001`, model deepseek-v4-pro via `brain/agent`:
 
 | Tool | Result | Time | Turns / tool calls | Cost (proxy) |
 |------|--------|------|--------------------|--------------|
@@ -81,6 +83,23 @@ is the open-source agent that matches Claude Code's autonomy at a fraction
 of the tokens (its system prompt is far smaller). Both are usable through
 the proxy today; `brain bench run --via-proxy <url>` runs the suite the way
 the clients actually use it (client key of the `benchmark` profile).
+
+### `:exacto` A/B (2026-09-22, Claude Code through the proxy, two runs each)
+
+| Model | Run 1 | Run 2 | Cost of both runs (proxy, real) |
+|-------|-------|-------|---------------------------------|
+| `deepseek/deepseek-v4-pro` | PASS, 72 s, 9 turns | PASS, 345 s, 17 requests | 0.22 $ |
+| `deepseek/deepseek-v4-pro:exacto` | PASS, 123 s, 20 turns | PASS, 154 s | 0.14 $ |
+
+All four pass; the spread between two runs of the *same* model (72 s vs
+345 s) is larger than any difference between the two sides, and every
+request landed on the same provider (StreamLake) either way. For this
+model Auto Exacto is already what the default route does, so the suffix
+changes nothing today; it stays available as a config switch
+([Provider routing](./architecture/api-layer.md#provider-routing-exacto)).
+Per-task cost is now ≈ 0.07–0.12 $, up from 0.03 $ on 2026-09-20: the
+catalog price of `deepseek-v4-pro` doubled in between (`tiers.yaml`
+updated).
 
 ## Known gaps
 

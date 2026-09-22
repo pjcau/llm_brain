@@ -23,12 +23,12 @@ profiles:
   - name: assistant
     description: local assistant app (chat, RAG)
     tier: fast
-    daily_limit_usd: 0.2
-    monthly_soft_usd: 3.0
+    daily_limit_usd: 0.5
+    monthly_soft_usd: 15.0
     l2_cache: exact
   - name: car
     description: find-a-car second hand (valuation, extraction)
     tier: fast
-    daily_limit_usd: 0.2
-    monthly_soft_usd: 3.0
+    daily_limit_usd: 0.5
+    monthly_soft_usd: 15.0
     l2_cache: exact
