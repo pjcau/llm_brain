@@ -99,8 +99,9 @@ and latency per backend.
 
 Pinning is the next step, not yet done: `provider.order` plus
 `allow_fallbacks` in the upstream body (OpenRouter has no sticky-session
-feature of its own). The measurement came first, and it says the scatter is between
-providers (see below), which is exactly what pinning addresses. Price is a second reason to choose: across those 16 endpoints
+feature of its own). The measurement came first, and it says the scatter
+is between providers (see below), which is exactly what pinning
+addresses. Price is a second reason to choose: across those 16 endpoints
 input runs from $0.919 to $1.91 per M and cache reads from $0.0766 to
 $0.33 per M.
 
