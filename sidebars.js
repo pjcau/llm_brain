@@ -10,7 +10,7 @@ const sidebars = {
     'deploy-vps',
     {
       type: 'category', label: 'Analysis', collapsed: false,
-      items: ['analysis/costs-90-10', 'analysis/hosting-costs', 'analysis/stack', 'analysis/agent-orchestrator', 'analysis/litellm', 'analysis/cli', 'analysis/tool-landscape'],
+      items: ['analysis/costs-90-10', 'analysis/hosting-costs', 'analysis/stack', 'analysis/agent-orchestrator', 'analysis/cli', 'analysis/tool-landscape'],
     },
     {
       type: 'category', label: 'Architecture', collapsed: false,
