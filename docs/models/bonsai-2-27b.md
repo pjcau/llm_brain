@@ -4,8 +4,10 @@ title: Bonsai 2 27B (ternary)
 
 # `prism-ml/ternary-bonsai-2-27b`
 
-Flagged because it's doing well in the benchmarks seen on OpenRouter.
-Benchmarks are verified in Phase 0 on our workload, not assumed.
+**Role today: the `reasoning` tier** (aider's architect), fallback
+deepseek-v4-pro. Not in the `brain/auto` ladder. Picked up on 2026-09-19
+because it did well in the benchmarks seen on OpenRouter; measured on our
+workload on 2026-09-20.
 
 ## Verified data (2026-09-19, OpenRouter and HuggingFace APIs)
 
@@ -20,13 +22,12 @@ Benchmarks are verified in Phase 0 on our workload, not assumed.
 | Local runtime | llama.cpp, Ollama, MLX (Mac) |
 | Hosting on OpenRouter | **a single provider** (Darkbloom, int4 quant) |
 
-## Why it matters more than any other model
+## Why it was interesting
 
-It is **the same model in the cloud and locally**. A ~7 GB ternary 27B
-runs on a consumer 8–12 GB GPU, so [Phase 0 → Phase 3](../roadmap.md)
-doesn't change the model, only `provider` in the tier. Natural candidate
-for `fast`; with a high `reasoning_effort`, potentially also a cheap
-`reasoning` — two tiers, one model.
+It is **the same model in the cloud and locally**: a ~7 GB ternary 27B
+runs on a consumer 8–12 GB GPU, so a move to [local GPU](../architecture/gpu.md)
+would change only the tier's provider, not the model. It was first the
+candidate for `fast`; the measurements below moved it to `reasoning`.
 
 ## Measured on 2026-09-20
 
@@ -55,14 +56,10 @@ tolerable there because the reasoning tier is called rarely and never has
 to apply edits. `fast` is `deepseek/deepseek-v4-flash`, which solved
 `ago-0001` with aider. Fallback for reasoning: `deepseek/deepseek-v4-pro`.
 
-## To verify in Phase 0, in order
+## Still open
 
-1. **Tool-call quality** behind Claude Code and aider: how many malformed
-   per 100 turns.
-2. **Skill adherence** (long prompts).
-3. **A single provider on OpenRouter** = availability/latency risk: the
-   `fast` tier needs a fallback to another model.
-4. **Prompt cache**: the endpoint doesn't declare it; real cost to measure
-   with Claude Code's system prompt.
-5. **Local**: tok/s on your GPU with the PQ2_0 GGUF, and whether ternary
-   quality holds against the cloud int4 endpoint.
+- **Local**: tok/s on a consumer GPU with the PQ2_0 GGUF, and whether
+  ternary quality holds against the cloud int4 endpoint. Only relevant if
+  the [GPU phase](../architecture/gpu.md) happens.
+- **Single provider** on OpenRouter: availability risk, covered by the
+  deepseek-v4-pro fallback.

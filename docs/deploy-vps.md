@@ -5,96 +5,120 @@ sidebar_position: 5
 
 # VPS deployment
 
-What runs on the VPS today: the `brain` binary with the **board** (budget
-per profile from OpenRouter's counters, benchmark rows). The tools' logs
-(aider chat, Claude Code sessions) stay on the laptop until Phase 1's proxy
-moves every request through the VPS. The infrastructure below — Caddy/TLS,
-systemd, Litestream, the release pipeline — is the same the proxy will use.
+What runs on the VPS: `brain serve` — the proxy (`/v1/*`, client-key
+auth) and the board — under systemd, behind Caddy with automatic HTTPS.
+The tools' own logs stay on the laptop; everything that goes through the
+proxy is recorded on the server.
 
-:::note Deployed on 2026-09-20
-Provider actually chosen: **Contabo** (x86_64, 4 vCPU, 8 GB, Ubuntu 24.04.5).
-Contabo has no cloud-init in the order flow, so the steps of
-`deploy/cloud-init.yaml` were run over SSH; one Contabo-specific detail:
-`/etc/ssh/sshd_config.d/50-cloud-init.conf` sets `PasswordAuthentication yes`
-and wins over later files, so the hardening file must sort first
-(`00-hardening.conf`). The board is live at `https://brain.<ip-with-dashes>.sslip.io/`
-(IP and access notes in the git-ignored `deploy/server.local.env`).
+:::note Live since 2026-09-20
+**Contabo** VPS (x86_64, 4 vCPU, 8 GB, Ubuntu 24.04), hostname
+`brain.<ip-with-dashes>.sslip.io` (no domain needed —
+[hostname vs domain](./analysis/hosting-costs.md#hostname-not-a-domain)).
+IP, hostname and board credentials are in the git-ignored
+`deploy/server.local.env`. Alternative: on Hetzner (the original plan,
+CAX11 ARM) paste `deploy/cloud-init.yaml` as the server's cloud config and
+skip step 1; use the `aarch64` binary.
 :::
 
-## 1. Create the server (you)
+## 1. Prepare the server (over SSH, as root)
 
-Hetzner Cloud → new project → server (or any provider with Ubuntu 24.04):
-
-| Setting | Value |
-|---------|-------|
-| Location | Falkenstein or Nuremberg (EU) |
-| Image | Ubuntu 24.04 |
-| Type | **CAX11** (2 vCPU Ampere ARM, 4 GB) — [why](./analysis/hosting-costs.md) |
-| SSH key | your public key (no password login) |
-| Cloud config | paste `deploy/cloud-init.yaml` |
-| Firewall | the cloud-init sets ufw (22/80/443); a Hetzner firewall with the same rules is a free extra layer |
-
-Optional: create a Hetzner **Object Storage** bucket (`llm-brain-backup`) and
-an S3 key pair for Litestream. Backblaze B2 works the same.
-
-Put the IP, plan and hostname in `deploy/server.local.env` (git-ignored,
-never committed; template created on first setup). No domain is needed: the hostname is
-`brain.<ip-with-dashes>.sslip.io` until you want a real one
-([hostname vs domain](./analysis/hosting-costs.md#hetzner-cax11-or-lightsail-5-and-is-a-domain-needed)).
-
-## 2. Install (from the laptop, over SSH)
-
-Binaries are built by CI for every `v*` tag (`.github/workflows/release.yml`):
-`brain-aarch64-unknown-linux-gnu` for CAX, `brain-x86_64-unknown-linux-gnu`
-for x86, with `.sha256` files. On the server:
+Contabo has no cloud-init in the order flow, so the steps of
+`deploy/cloud-init.yaml` are run by hand; order the server with your SSH
+public key.
 
 ```bash
-# as root, after cloud-init finished (cloud-init status --wait)
+apt-get update && apt-get -y upgrade
+apt-get install -y ufw fail2ban unattended-upgrades git curl ca-certificates \
+  debian-keyring debian-archive-keyring apt-transport-https
+useradd --system --home /opt/llm_brain --shell /usr/sbin/nologin brain
+mkdir -p /opt/llm_brain/data /opt/llm_brain/config
+# SSH keys only. Contabo's 50-cloud-init.conf sets PasswordAuthentication yes
+# and the first file wins, so the hardening file must sort before it.
+printf 'PasswordAuthentication no\nPermitRootLogin prohibit-password\nKbdInteractiveAuthentication no\n' \
+  > /etc/ssh/sshd_config.d/00-hardening.conf && systemctl restart ssh
+# Caddy (official repo): the two curl lines from deploy/cloud-init.yaml, then
+apt-get update && apt-get install -y caddy
+ufw default deny incoming && ufw default allow outgoing
+ufw allow OpenSSH && ufw allow 80/tcp && ufw allow 443/tcp && ufw --force enable
+systemctl enable --now fail2ban
+```
+
+Plus the unattended-upgrades file from `cloud-init.yaml`
+(`/etc/apt/apt.conf.d/20auto-upgrades`).
+
+## 2. Install `brain`
+
+Binaries are built by CI for every `v*` tag (`.github/workflows/release.yml`):
+`brain-x86_64-unknown-linux-gnu` and `brain-aarch64-unknown-linux-gnu`,
+each with a `.sha256`.
+
+```bash
 cd /opt/llm_brain
-curl -fsSLO https://github.com/pjcau/llm_brain/releases/latest/download/brain-aarch64-unknown-linux-gnu
-curl -fsSLO https://github.com/pjcau/llm_brain/releases/latest/download/brain-aarch64-unknown-linux-gnu.sha256
-sha256sum -c brain-aarch64-unknown-linux-gnu.sha256 && install -m 0755 brain-aarch64-unknown-linux-gnu brain   # x86: the x86_64 files
+B=brain-x86_64-unknown-linux-gnu
+curl -fsSLO https://github.com/pjcau/llm_brain/releases/latest/download/$B
+curl -fsSLO https://github.com/pjcau/llm_brain/releases/latest/download/$B.sha256
+sha256sum -c $B.sha256 && install -m 0755 $B brain
 git clone --depth 1 https://github.com/pjcau/llm_brain /tmp/src && cp -r /tmp/src/config /opt/llm_brain/
 ```
 
-Secrets: create `/opt/llm_brain/.env` (mode 0600, owner `brain`) with the
-`OPENROUTER_KEY_*` lines and `BRAIN_HOME=/opt/llm_brain`,
-`BRAIN_DB=/opt/llm_brain/data/brain.db`. Copy it with `scp` from the laptop
-or paste it; it never goes through git or chat
-([secrets](./architecture/secrets.md)).
+Secrets: `/opt/llm_brain/.env` (mode 0600, owner `brain`) with the
+`OPENROUTER_KEY_*` lines, `BRAIN_HOME=/opt/llm_brain`,
+`BRAIN_DB=/opt/llm_brain/data/brain.db`. Copied with `scp` from the
+laptop; never through git or chat ([secrets](./architecture/secrets.md)).
 
 ```bash
-cp /tmp/src/deploy/brain.service /etc/systemd/system/
-cp /tmp/src/deploy/Caddyfile /etc/caddy/Caddyfile   # edit the hostname line
+cp /tmp/src/deploy/brain.service /etc/systemd/system/   # brain serve --bind 127.0.0.1:8080 --refresh 600
+cp /tmp/src/deploy/Caddyfile /etc/caddy/Caddyfile       # then edit: hostname, bcrypt hash, API routes (below)
 chown -R brain:brain /opt/llm_brain && chmod 600 /opt/llm_brain/.env
 systemctl daemon-reload && systemctl enable --now brain && systemctl reload caddy
 curl -s https://brain.<ip-with-dashes>.sslip.io/health   # → ok
 ```
 
-Backups (optional now, required for the proxy): `/etc/litestream.yml` from
-`deploy/litestream.yml`, credentials in `/etc/default/litestream`,
-`systemctl enable --now litestream`. Restore = `litestream restore -o
-/opt/llm_brain/data/brain.db s3://llm-brain-backup/brain.db`.
+The Caddyfile on the server sends `/v1/*`, `/api/hello` and `/health`
+straight to brain (the proxy's own key auth applies, `flush_interval -1`
+for SSE) and keeps **basic auth** on everything else (the board;
+`caddy hash-password` for the hash, credentials in `server.local.env`).
 
-## 3. Update
+Client keys are issued on the server ([Phase 1](./phase-1.md#issue-a-key-on-the-server-admin-only)):
 
 ```bash
-systemctl stop brain && curl -fsSLo /opt/llm_brain/brain https://github.com/pjcau/llm_brain/releases/latest/download/brain-aarch64-unknown-linux-gnu && chmod 0755 /opt/llm_brain/brain && systemctl start brain
+cd /opt/llm_brain && sudo -u brain env BRAIN_HOME=/opt/llm_brain BRAIN_DB=/opt/llm_brain/data/brain.db \
+  ./brain keys create --profile dev --name laptop
 ```
 
-## Phase 1 on the VPS (2026-09-20)
+## Update
 
-v0.2.0 deployed: `brain serve` is the proxy + board. Caddy sends `/v1/*`,
-`/api/hello` and `/health` straight to brain (the proxy's own key auth
-applies) and keeps basic auth on the board. Verified from outside: `401`
-without a key in both dialects, a real call with a `dev` client key
-succeeds. Keys are issued on the server:
-`sudo -u brain env BRAIN_HOME=/opt/llm_brain BRAIN_DB=/opt/llm_brain/data/brain.db ./brain keys create --profile dev --name laptop`.
+New release, or changed `config/*.yaml` (read at start only):
+
+```bash
+# binary
+cd /opt/llm_brain && B=brain-x86_64-unknown-linux-gnu
+curl -fsSLO https://github.com/pjcau/llm_brain/releases/latest/download/$B
+curl -fsSLO https://github.com/pjcau/llm_brain/releases/latest/download/$B.sha256
+sha256sum -c $B.sha256 && systemctl stop brain && install -m 0755 $B brain && systemctl start brain
+# config, from the laptop
+scp config/profiles.yaml config/tiers.yaml root@<vps>:/opt/llm_brain/config/ && ssh root@<vps> systemctl restart brain
+```
+
+After changing a profile's `daily_limit_usd`, also run `brain upstream
+sync` (laptop, management key) so the OpenRouter key's own limit follows.
 
 ## What is exposed
 
-Caddy on 80/443 with automatic HTTPS, everything else closed by ufw;
-`brain` listens on `127.0.0.1:8080` only. The board is behind **basic
-auth in Caddy** (bcrypt hash in the Caddyfile, credentials kept in the
-git-ignored `deploy/server.local.env`); `/health` stays open. The Phase 1
-key middleware will replace it for the API routes.
+| Route | Auth |
+|-------|------|
+| `/v1/*`, `/api/hello` | client key, checked by `brain` |
+| `/health` | open |
+| `/`, `/api/summary` (board) | Caddy basic auth |
+
+Caddy on 80/443, everything else closed by ufw; `brain` listens on
+`127.0.0.1:8080` only.
+
+## Backups: not set up
+
+Litestream is **not installed**: the `.deb` asset name changed upstream
+and the install was deferred. The SQLite file (`data/brain.db`: client
+keys, requests) is currently not replicated. The intended setup is in
+`deploy/litestream.yml` (S3-compatible bucket, credentials in
+`/etc/default/litestream`, restore with `litestream restore -o
+/opt/llm_brain/data/brain.db s3://llm-brain-backup/brain.db`).

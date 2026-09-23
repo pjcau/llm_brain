@@ -5,7 +5,11 @@ sidebar_position: 4
 
 # Configuration reference
 
-Everything needed to run Phase 0 on another machine.
+Everything needed to run `brain` on the laptop and point the clients at
+the proxy. The server side is on [VPS deployment](./deploy-vps.md).
+**No secrets here**: keys are always referenced by environment variable
+name; the values live only in an uncommitted `.env` (mode 0600),
+`deploy/server.local.env` or your shell.
 
 ## Install `brain` and use it from any folder
 
@@ -22,111 +26,122 @@ it walks up to find them; from anywhere else it uses **`BRAIN_HOME`**:
 BRAIN_HOME=/home/<you>/Documents/myProjects/llm_brain
 ```
 
-With `BRAIN_HOME` set, `brain.db`, `bench/tasks`, `bench/.cache` and
-`bench/.runs` resolve inside the repo whatever the current directory, and
-`.env` is loaded from there if the cwd has none. `--config DIR` and
-`--db FILE` still override.
-
-Typical failure and its cause:
+With `BRAIN_HOME` set, `bench/tasks`, `bench/.cache` and `bench/.runs`
+resolve inside the repo whatever the current directory, and `.env` is
+loaded from there if the cwd has none. `--config DIR` and `--db FILE`
+override.
 
 | Symptom | Cause |
 |---------|-------|
 | `Command 'brain' not found` | not installed on PATH: run the `cargo install` line above (or call `target/release/brain`) |
 | `no config/profiles.yaml found upwards … set BRAIN_HOME` | called from another folder without `BRAIN_HOME` |
 | `OPENROUTER_KEY_DEV not set` / auth error | `.env` not sourced in this shell: `set -a; . $BRAIN_HOME/.env; set +a` in `~/.bashrc`, then open a new terminal |
-| functions `or-aider` / `or-claude` missing | they live in `~/.bashrc`, which only interactive shells read; open a new terminal or `source ~/.bashrc` | **No secrets here**:
-keys are always referenced by environment variable name; the values live
-only in an uncommitted `.env` (mode 0600) or in your shell.
+| `px-claude` / `px-aider` missing | they live in `~/.bashrc`, which only interactive shells read; open a new terminal or `source ~/.bashrc` |
 
 ## Files in the repo
 
 | File | Purpose | Secrets? |
 |------|---------|----------|
-| `config/profiles.yaml` | one profile per client: tier, daily hard limit, monthly soft cap, L2 cache policy | no — the key is `OPENROUTER_KEY_<PROFILE>` in the env |
-| `config/tiers.yaml` | `fast` / `reasoning` / `premium` → OpenRouter model, fallback, context, prices | no |
+| `config/profiles.yaml` | one profile per client: tier, daily hard limit, monthly soft cap, L2 cache policy (not built yet), optional `router` | no — the key is `OPENROUTER_KEY_<PROFILE>` in the env |
+| `config/tiers.yaml` | `fast` / `reasoning` / `medium` / `agent` / `max` / `premium` → OpenRouter model, fallback, context, prices, output cap; the global `brain/auto` router | no |
 | `.env.example` | the variable names to fill in | no (template) |
 | `.env` | the actual keys, **git-ignored**, `chmod 600` | **yes** — never commit, never paste in chat |
-| `bench/tasks/*.yaml` | benchmark tasks | no |
+| `deploy/server.local.env` | VPS IP, hostname, board credentials, `BRAIN_BASE_URL`, `BRAIN_DEV_KEY`; git-ignored | **yes** |
+| `bench/tasks/*.yaml` | benchmark tasks ([format](./architecture/benchmark.md)) | no |
 
 ### `config/profiles.yaml`
 
 ```yaml
 profiles:
-  - name: dev          # Claude Code + aider on the laptop
+  - name: dev
+    description: Claude Code + aider on the laptop
     tier: fast
-    daily_limit_usd: 5.0     # raised from 3.0 on 2026-09-20, see the budget page
+    daily_limit_usd: 5.0
     monthly_soft_usd: 60.0
     l2_cache: off
-  - name: ago          # agent-orchestrator as a client (not integrated yet)
+  - name: ago                # agent-orchestrator as a client (not integrated yet)
     tier: fast
     daily_limit_usd: 1.0
     monthly_soft_usd: 5.0
     l2_cache: off
-  - name: benchmark    # nightly benchmark runner
+  - name: benchmark          # benchmark runner, never at the expense of dev
     tier: fast
     daily_limit_usd: 0.5
     monthly_soft_usd: 5.0
     l2_cache: off
-  - name: assistant    # local assistant app
+  - name: assistant          # local assistant app (chat, RAG)
     tier: fast
     daily_limit_usd: 0.5
     monthly_soft_usd: 15.0
     l2_cache: exact
-    router:            # its own brain/auto ladder (chat, not coding) — see Auto routing
+    router:                  # its own brain/auto ladder (chat, not coding); replaces the global one
       model: typesafe/jev-1.13
       context: Message from a user to a personal chat assistant that can search the user's documents
       fallback: fast
       baseline: medium
+      min_confidence: 0.5
+      session_ttl_s: 7200
       ladder:
         - {tier: fast,   when: a greeting, a short factual question, a lookup or FAQ …}
         - {tier: medium, when: an explanation, a summary or comparison, drafting a text …}
         - {tier: agent,  when: a multi-step analysis, a long structured document, planning …}
-  - name: car          # find-a-car
+  - name: car                # find-a-car (valuation, extraction)
     tier: fast
     daily_limit_usd: 0.5
     monthly_soft_usd: 15.0
     l2_cache: exact
 ```
 
+`daily_limit_usd` is both the OpenRouter key's own limit (ring 1, pushed
+with `brain upstream sync`) and the proxy's 100% line (ring 2);
+[Budget](./architecture/budget.md). Every profile has a `description:`;
+the excerpt shortens most of them to comments.
+
 ### `config/tiers.yaml`
 
 ```yaml
 tiers:
-  fast:                                   # daily driver, editor role in aider, Claude Code's "haiku" role
+  fast:                                   # daily driver, editor in aider, Claude Code's background model
     model: deepseek/deepseek-v4-flash
     fallback: qwen/qwen3.7-flash
     context: 1048576
     input_usd_per_m: 0.09
     output_usd_per_m: 0.18
-  reasoning:                              # architect role in aider, /model in Claude Code
+    max_output_tokens: 16384              # policy cap; the provider's own max comes from the catalog
+  reasoning:                              # architect in aider
     model: prism-ml/ternary-bonsai-2-27b
     fallback: deepseek/deepseek-v4-pro
     context: 262144
     input_usd_per_m: 0.075
     output_usd_per_m: 0.5
+    max_output_tokens: 32768
   medium:                                 # rung between fast and agent
     model: z-ai/glm-5.3-flash
     fallback: deepseek/deepseek-v4-flash
+    context: 1310720
     input_usd_per_m: 0.15
     output_usd_per_m: 0.50
-  agent:                                  # Claude Code's main model through the proxy
-    model: deepseek/deepseek-v4-pro       # `deepseek/deepseek-v4-pro:exacto` to force provider sorting by tool-call accuracy
+    max_output_tokens: 32768
+  agent:                                  # Claude Code's main model when pinned; brain/auto's fallback
+    model: deepseek/deepseek-v4-pro       # `…:exacto` to sort providers by tool-call accuracy
     fallback: qwen/qwen3.7-plus
     context: 1048576
     input_usd_per_m: 0.96
     output_usd_per_m: 1.91
+    max_output_tokens: 32768
   max:                                    # top rung
     model: z-ai/glm-5.3
     fallback: deepseek/deepseek-v4-pro
+    context: 1310720
     input_usd_per_m: 0.84
     output_usd_per_m: 2.64
+    max_output_tokens: 32768
   premium:
     model: null
 
-# brain/auto: a decision model picks a rung once per session — docs/architecture/auto-routing.md
+# brain/auto — docs/architecture/auto-routing.md
 router:                                   # global ladder; a profile's own `router` replaces it
   model: typesafe/jev-1.13
-  context: Task given to an autonomous coding agent   # prefixed to what the decision model reads
   fallback: agent                         # decision model down or unsure
   baseline: agent                         # the board's "would have cost on" reference
   min_confidence: 0.5
@@ -138,183 +153,123 @@ router:                                   # global ladder; a profile's own `rout
     - {tier: max,    when: a large refactor, a design decision, a subtle concurrency or security bug …}
 ```
 
-Prices are the OpenRouter catalog's, re-checked 2026-09-22 (they moved
-~2× since 2026-09-20); the proxy bills from OpenRouter's `cost` when
-present and only estimates from these numbers otherwise. A model id may
-carry an OpenRouter routing suffix (`:exacto`, `:nitro`, `:floor`); the
-catalog lookup (max output tokens, prices) strips it. See
-[Provider routing](./architecture/api-layer.md#provider-routing-exacto).
+`router.context` (prefixed to what the decision model reads) defaults to
+"Task given to an autonomous coding agent"; the `assistant` profile sets
+its own. Prices are the OpenRouter catalog's, re-checked 2026-09-22 (~2×
+since 2026-09-20); the proxy bills from OpenRouter's `cost` when present
+and only estimates from these numbers otherwise. A model id may carry an
+OpenRouter routing suffix (`:exacto`, `:nitro`, `:floor`); the catalog
+lookup strips it ([Provider routing](./architecture/api-layer.md#provider-routing-exacto)).
+The server reads both files at start: after changing them, copy them to
+the VPS and restart `brain` ([update](./deploy-vps.md#update)).
+
+The proxy caps `max_tokens` per request to the smaller of the provider's
+maximum (OpenRouter catalog, refreshed hourly) and the tier's
+`max_output_tokens`: the catalog allows 384 000 output tokens for
+deepseek-v4-flash, which is how one request once produced 89 000 of them.
+`brain models` prints those facts per tier.
 
 ### `.env` (from `.env.example`)
 
 ```bash
-# only while running `brain keys provision`; delete the line afterwards
+# only while running `brain upstream provision|sync|list`; delete the line afterwards
 OPENROUTER_MANAGEMENT_KEY=
-# one per profile, created by `brain keys provision`
+# one per profile, created by `brain upstream provision`
 OPENROUTER_KEY_DEV=
 OPENROUTER_KEY_AGO=
 OPENROUTER_KEY_BENCHMARK=
 OPENROUTER_KEY_ASSISTANT=
 OPENROUTER_KEY_CAR=
-# local SQLite (usage snapshots, events, benchmark runs), relative to BRAIN_HOME
-BRAIN_DB=brain.db
+# SQLite (usage snapshots, events, requests, benchmark runs); default ./brain.db
+BRAIN_DB=data/brain.db
 # repo dir, so `brain` works from any folder
 BRAIN_HOME=/home/<you>/Documents/myProjects/llm_brain
-# where the tools' logs go (default ~/.local/share/llm_brain)
-# BRAIN_DATA=
+# optional
+# BRAIN_DATA=             tools' logs and generated aider files (default ~/.local/share/llm_brain)
+# BRAIN_AIDER_ROOTS=      repos scanned for .aider.chat.history.md, `:`-separated (default ~/Documents/myProjects)
+# BRAIN_CLAUDE_PROJECTS=  extra Claude Code projects dir for `events ingest`
+# BRAIN_BENCH_KEY=        client key of the `benchmark` profile, for `bench run --via-proxy`
 ```
 
-## Shell (`~/.bashrc`)
+## Through the proxy
 
-Generated by the `brain setup` commands; copied here for reference. Only
-variable *names* appear.
-
-| Command | Prints |
-|---------|--------|
-| `brain setup aider` | env block + model metadata for an aider installed on the host |
-| `brain setup aider --docker llm-brain-aider-test:latest` | `or-aider` function running aider from the image (**verified**: it solved `ago-0001`) |
-| `brain setup claude-code` | env block for the host's `claude` (**verified**: benchmark runs use it) |
-| `brain setup claude-code --docker llm-brain-claude-test:latest` | `or-claude` function running Claude Code from the image — **open issue**: hangs on first start in a fresh HOME (connection to api.anthropic.com), even with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and stdin closed. Use the host function meanwhile |
+The daily setup. `BRAIN_BASE_URL` and `BRAIN_DEV_KEY` (a `dev` client key,
+[issued on the server](./phase-1.md#issue-a-key-on-the-server-admin-only))
+live in `deploy/server.local.env`, sourced by `~/.bashrc`. `brain setup
+claude-code --proxy` and `brain setup aider --proxy` print:
 
 ```bash
-# profile keys in the shell (values come from the git-ignored .env)
-set -a; . ~/Documents/myProjects/llm_brain/.env; set +a
-
-# aider from the Docker image: current repo mounted, runs as your user,
-# logs where `brain events ingest` reads them
-or-aider() {
-  mkdir -p "$HOME/.local/share/llm_brain"
-  docker run --rm -it --user "$(id -u):$(id -g)" -e HOME=/tmp \
-    -v "$PWD:$PWD" -w "$PWD" -v "$HOME/.local/share/llm_brain:$HOME/.local/share/llm_brain" \
-    -e OPENAI_API_BASE=https://openrouter.ai/api/v1 -e OPENAI_API_KEY="$OPENROUTER_KEY_DEV" \
-    llm-brain-aider-test:latest aider --architect \
-      --model openai/prism-ml/ternary-bonsai-2-27b --editor-model openai/deepseek/deepseek-v4-flash \
-      --no-check-update --no-analytics \
-      --model-metadata-file "$HOME/.local/share/llm_brain/aider-model-metadata.json" \
-      --model-settings-file "$HOME/.local/share/llm_brain/aider-model-settings.yml" \
-      --chat-history-file "$HOME/.local/share/llm_brain/aider-chat.md" \
-      --llm-history-file "$HOME/.local/share/llm_brain/aider-llm.history" "$@"
-}
-
-# aider installed on the host (same logs)
-or-aider-host() {
-  OPENAI_API_BASE=https://openrouter.ai/api/v1 OPENAI_API_KEY="$OPENROUTER_KEY_DEV" \
-  aider --architect --model openai/prism-ml/ternary-bonsai-2-27b --editor-model openai/deepseek/deepseek-v4-flash \
-    --model-metadata-file "$HOME/.local/share/llm_brain/aider-model-metadata.json" \
-    --model-settings-file "$HOME/.local/share/llm_brain/aider-model-settings.yml" \
-    --chat-history-file "$HOME/.local/share/llm_brain/aider-chat.md" \
-    --llm-history-file "$HOME/.local/share/llm_brain/aider-llm.history" "$@"
-}
-
-# Claude Code from the host, same dev key; plain `claude` keeps the subscription
-or-claude() {
-  ANTHROPIC_BASE_URL=https://openrouter.ai/api \
-  ANTHROPIC_AUTH_TOKEN="$OPENROUTER_KEY_DEV" \
-  ANTHROPIC_MODEL=deepseek/deepseek-v4-flash \
-  ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek/deepseek-v4-flash \
-  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 \
-  CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 \
-  claude "$@"
-}
-```
-
-If aider is installed on the host instead of Docker, the equivalent is
-`brain setup aider` (env block + `.aider.model.metadata.json`).
-
-### Through the proxy (Phase 1)
-
-Same tools, base URL = the VPS, key = a client key issued on the server.
-`BRAIN_BASE_URL` and `BRAIN_DEV_KEY` live in the git-ignored
-`deploy/server.local.env`, sourced by `~/.bashrc`. `brain setup aider
---proxy` prints the function and the conventions file:
-
-```bash
-px-aider() {
-  OPENAI_API_BASE="$BRAIN_BASE_URL/v1" OPENAI_API_KEY="$BRAIN_DEV_KEY" \
-  aider --architect --model openai/brain/reasoning --editor-model openai/brain/fast \
-    --model-metadata-file "$HOME/.local/share/llm_brain/aider-model-metadata.json" \
-    --llm-history-file "$HOME/.local/share/llm_brain/aider-llm.history" \
-    --yes-always --auto-accept-architect --auto-commits --show-diffs --restore-chat-history \
-    --no-suggest-shell-commands --no-check-update --no-show-model-warnings --notifications \
-    --read "$HOME/.local/share/llm_brain/aider-conventions.md" "$@"
-}
 px-claude() {
   ANTHROPIC_BASE_URL="$BRAIN_BASE_URL" ANTHROPIC_AUTH_TOKEN="$BRAIN_DEV_KEY" \
   ANTHROPIC_MODEL=brain/auto ANTHROPIC_DEFAULT_HAIKU_MODEL=brain/fast \
-  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 claude "$@"
+  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1 \
+  claude "$@"
 }
 # pin a tier instead of the per-session decision: ANTHROPIC_MODEL=brain/agent px-claude
+
+px-aider() {
+  OPENAI_API_BASE="$BRAIN_BASE_URL/v1" OPENAI_API_KEY="$BRAIN_DEV_KEY" \
+  aider --architect --model openai/brain/reasoning --editor-model openai/brain/fast \
+    --model-metadata-file $HOME/.local/share/llm_brain/aider-model-metadata.json \
+    --model-settings-file $HOME/.local/share/llm_brain/aider-model-settings.yml \
+    --llm-history-file $HOME/.local/share/llm_brain/aider-llm.history \
+    --yes-always --auto-accept-architect --auto-commits --show-diffs --restore-chat-history \
+    --no-suggest-shell-commands --no-check-update --no-show-model-warnings --notifications \
+    --read $HOME/.local/share/llm_brain/aider-conventions.md \
+    $([ -f CLAUDE.md ] && echo --read CLAUDE.md) "$@"
+}
 ```
 
-`brain/fast` and `brain/reasoning` are aliases resolved on the server; the
-proxy adds the `models[]` fallback itself, so no settings file is needed
-for that (the aider metadata file has entries for the aliases so costs
-display).
+`brain setup aider --proxy` also prints the settings file and the
+conventions file to save under `~/.local/share/llm_brain/`. `brain/*` are
+aliases resolved on the server; the proxy adds the `models[]` fallback
+itself. Plain `claude` keeps the subscription: the function sets the
+variables for that one invocation only. Putting the same variables in
+`~/.claude/settings.json` → `"env"` would send *every* session through the
+proxy.
 
-What the flags do, and why ("make it behave like Claude Code"):
+What the aider flags do ("make it behave like Claude Code"):
 
 | Flag | Effect |
 |------|--------|
 | `--yes-always`, `--auto-accept-architect` | no confirmations; in architect mode the proposal is applied without the "Edit the files?" prompt (the reason edits "were announced but never appeared") |
 | `--auto-commits`, `--show-diffs` | every applied edit is committed with a conventional message, and the diff is printed |
-| `--restore-chat-history` | resumes the previous conversation of **that repo** (`.aider.chat.history.md`, aider's default location, git-ignored by aider); `brain events ingest` scans the repos under `BRAIN_AIDER_ROOTS` (default `~/Documents/myProjects`) to keep the board fed |
-| `--read …/aider-conventions.md` | standing rules loaded every session (small steps, tests with the change, conventional commits, no secrets, plain-text replies — the last one stops bonsai from emitting fake `<tool_call>` markup as architect) |
+| `--restore-chat-history` | resumes the previous conversation of **that repo** (`.aider.chat.history.md`); `brain events ingest` scans the repos under `BRAIN_AIDER_ROOTS` to keep the board fed |
+| `--read …/aider-conventions.md`, `--read CLAUDE.md` | standing rules every session (small steps, tests with the change, conventional commits, no secrets, plain-text replies — the last one stops bonsai from emitting fake `<tool_call>` markup as architect), plus the repo's own rules |
 | `--no-suggest-shell-commands` | with `--yes-always` on, aider must not auto-run commands the model suggests |
 
-What aider cannot do: accept typing while it is generating. Its chat is
-synchronous; that difference from Claude Code stays.
+aider cannot accept typing while it is generating; that difference from
+Claude Code stays.
 
-The proxy also caps `max_tokens` per request to the smaller of the
-provider's maximum (from the OpenRouter catalog, refreshed hourly) and the
-tier's `max_output_tokens` in `config/tiers.yaml` (16 384 for `fast`,
-32 768 for `reasoning`): the catalog shows deepseek-v4-flash allows 384 000
-output tokens, which is how one request produced 89 000 of them.
-`brain models` prints those facts per tier.
+### Direct to OpenRouter (Phase 0 path)
 
-### Claude Code via `settings.json` instead of a function
+Still printed, used by the benchmark and when the proxy is down; the
+profile's `OPENROUTER_KEY_*` pays:
 
-`~/.claude/settings.json` → `"env": { … }` with the same six variables makes
-*every* Claude Code session go through OpenRouter (and stop using the
-subscription). Use the function while measuring, the settings file when
-you switch for good.
+| Command | Prints |
+|---------|--------|
+| `brain setup claude-code` | env block for the host's `claude` (`ANTHROPIC_BASE_URL=https://openrouter.ai/api`, model = `fast`) |
+| `brain setup aider` | env block (architect = `reasoning`, editor = `fast`) + model metadata + settings file |
+| `brain setup aider --docker llm-brain-aider-test:latest` | `or-aider`: aider from the image, current repo mounted, logs under `BRAIN_DATA` |
 
-## The board (`brain serve`, in Docker)
-
-```bash
-docker compose -f deploy/docker-compose.board.yml up -d --build   # → http://127.0.0.1:8090/
-docker compose -f deploy/docker-compose.board.yml down
-```
-
-One container (`llm-brain-board`, image built from `docker/brain.Dockerfile`)
-runs `brain serve`: the page on `/` (budget cards per profile, sessions
-per profile × end user, proxy traffic per day × profile × model, live feed
-of the last requests, anomalies, tool logs, benchmark runs; phone-friendly;
-reloads every 30 s),
-JSON on `/api/summary`, `/health`. Every 10 minutes it takes the usage
-snapshots and ingests the tools' logs itself, so no cron is needed while
-it runs. Mounts: `config/` and `data/` (the shared SQLite) from the repo,
-`~/.local/share/llm_brain` and `~/.claude/projects` read-only; keys come
-from `.env` via `env_file`. Bound to `127.0.0.1` only.
-
-Docker engine: on Linux the native engine; on macOS **OrbStack** works
-unchanged (it exposes the standard Docker socket and `docker compose`).
-
-Without Docker: `brain serve --bind 127.0.0.1:8080` does the same from the
-host binary.
+Claude Code in Docker (`setup claude-code --docker`, `docker/claude-test.Dockerfile`)
+was abandoned: the container hangs on first start in a fresh HOME. The
+flag still exists; nothing uses it.
 
 ## aider model fallbacks and edit formats (`.aider.model.settings.yml`)
 
-bonsai has a single provider; when it returns an error, aider would only
-retry. `brain setup aider` also prints `.aider.model.settings.yml`, saved
-at `~/.local/share/llm_brain/aider-model-settings.yml` and passed with
-`--model-settings-file`: per model, `extra_params.extra_body.models` lists
+`brain setup aider` prints it; saved at
+`~/.local/share/llm_brain/aider-model-settings.yml` and passed with
+`--model-settings-file`. Per model, `extra_params.extra_body.models` lists
 the tier's primary and fallback, and OpenRouter switches on provider
-errors, rate limits or downtime, billing the model actually used (verified
-on the wire on 2026-09-20). The same file sets the **edit format**: aider
-assigns `whole` (full-file rewrites) to models it doesn't know, which on a
-large file meant 101k tokens in one turn and a failed edit; the fast tier,
-being the editor, gets `diff` / `editor-diff` as aider itself uses for
-DeepSeek.
+errors, rate limits or downtime, billing the model actually used (bonsai
+has a single provider). The same file sets the **edit format**: aider
+gives unknown models `whole` (full-file rewrites: 101k tokens in one turn
+and a failed edit in [Phase 0](./phase-0.md)); the fast tier, as editor,
+gets `diff` / `editor-diff`. In architect mode the architect's entry
+decides the editor format, so `reasoning` declares `editor-diff` too.
+aider matches by name, so the `brain/*` aliases (proxy path) get entries
+as well, without the chain (the proxy adds it):
 
 ```yaml
 - name: openai/deepseek/deepseek-v4-flash
@@ -324,38 +279,61 @@ DeepSeek.
   extra_params:
     extra_body:
       models: ["deepseek/deepseek-v4-flash", "qwen/qwen3.7-flash"]
+- name: openai/brain/fast
+  edit_format: diff
+  editor_edit_format: editor-diff
+  use_repo_map: true
 - name: openai/prism-ml/ternary-bonsai-2-27b
+  editor_edit_format: editor-diff
   use_repo_map: true
   extra_params:
     extra_body:
       models: ["prism-ml/ternary-bonsai-2-27b", "deepseek/deepseek-v4-pro"]
+- name: openai/brain/reasoning
+  editor_edit_format: editor-diff
+  use_repo_map: true
 ```
-
-Claude Code cannot get the equivalent (`fallbacks` on the Anthropic
-endpoint) from environment variables: that is a Phase 1 proxy feature.
 
 ## aider model metadata
 
-`brain setup aider` prints it; saved at
-`~/.local/share/llm_brain/aider-model-metadata.json` so aider shows real
-costs for the tier models:
+`brain setup aider` also prints `aider-model-metadata.json` (save it in
+`~/.local/share/llm_brain/`) with context and per-token prices from
+`tiers.yaml` for the `fast` and `reasoning` models, so aider shows costs.
+It has entries for the concrete model ids only, not for `brain/*`.
 
-```json
-{
-  "openai/deepseek/deepseek-v4-flash": {
-    "max_input_tokens": 1048576, "max_output_tokens": 32768,
-    "input_cost_per_token": 4e-8, "output_cost_per_token": 8e-8,
-    "litellm_provider": "openai", "mode": "chat"
-  },
-  "openai/prism-ml/ternary-bonsai-2-27b": {
-    "max_input_tokens": 262144, "max_output_tokens": 32768,
-    "input_cost_per_token": 7.5e-8, "output_cost_per_token": 5e-7,
-    "litellm_provider": "openai", "mode": "chat"
-  }
-}
+## The board (`brain serve`, in Docker)
+
+On the VPS the board is part of `brain serve` ([sections](./phase-1.md#the-board)).
+A local copy:
+
+```bash
+docker compose -f deploy/docker-compose.board.yml up -d --build   # → http://127.0.0.1:8090/
+docker compose -f deploy/docker-compose.board.yml down
 ```
 
-## Cron (hourly)
+One container (`llm-brain-board`, image from `docker/brain.Dockerfile`)
+runs `brain serve`. Every 10 minutes (`--refresh 600`) it takes the usage
+snapshots and ingests the tools' logs itself, so no cron is needed while
+it runs. Mounts: `config/` (ro) and `data/` (the shared SQLite) from the
+repo, `~/.local/share/llm_brain` and `~/.claude/projects` read-only; keys
+from `.env` via `env_file`. Bound to `127.0.0.1` only. On macOS OrbStack
+works unchanged. Without Docker: `brain serve --bind 127.0.0.1:8080`.
+
+## Tool logs (`brain events`)
+
+What the tools leave on disk, for traffic that does not go through the
+proxy (and for the Phase 0 history):
+
+| Source | What it gives | Default location |
+|--------|---------------|------------------|
+| aider chat history | one `Tokens: N sent, M received` line per round trip, the model, and every notice (`litellm.*Error`, `Retrying…`, edit-format failures) | `$BRAIN_DATA/aider-chat.md`, and `.aider.chat.history.md` in the repos under `BRAIN_AIDER_ROOTS` |
+| Claude Code transcripts | per assistant message: model and `usage` (input, cache read/write, output); API errors | `~/.claude/projects/*/*.jsonl`, plus `BRAIN_CLAUDE_PROJECTS` |
+
+`brain events ingest` reads only the new bytes of each file (offsets in
+SQLite); `brain events report` prints day × tool × model with anomalies:
+error rate > 10% on ≥ 5 requests · ≥ 3 retries in a day · cache hit < 30%
+on ≥ 10 requests · > 150k prompt tokens per request. Subscription traffic
+is never an anomaly. Without the board, an hourly cron does the same:
 
 ```
 0 * * * * cd ~/Documents/myProjects/llm_brain && ./target/release/brain usage snapshot >> usage.log 2>&1 && ./target/release/brain events ingest >> usage.log 2>&1
@@ -364,29 +342,27 @@ costs for the tier models:
 ## Docker images
 
 ```bash
-docker build -f docker/aider-test.Dockerfile  -t llm-brain-aider-test .
-docker build -f docker/claude-test.Dockerfile -t llm-brain-claude-test .   # Claude Code 2.1.x, see the open issue above
+docker build -f docker/aider-test.Dockerfile    -t llm-brain-aider-test .     # or-aider, bench --docker, CI container test
+docker build -f docker/opencode-test.Dockerfile -t llm-brain-opencode-test .  # OpenCode for the benchmark / local trials
+docker build -f docker/brain.Dockerfile         -t llm-brain:local .          # the board (compose builds it)
 ```
-
-Used by `or-aider`, by `brain bench run --docker llm-brain-aider-test:latest`
-and by the container test in CI.
 
 ## `brain` commands
 
 | Command | Needs |
 |---------|-------|
-| `brain upstream provision [--force] [--only dev,car]` | `OPENROUTER_MANAGEMENT_KEY` |
-| `brain upstream sync [--only dev]` — PATCH the daily limit of the existing keys to match `profiles.yaml`, the secrets do not change | `OPENROUTER_MANAGEMENT_KEY` |
+| `brain upstream provision [--force] [--only dev,car]` — one OpenRouter key per profile with its daily limit | `OPENROUTER_MANAGEMENT_KEY` |
+| `brain upstream sync [--only dev]` — PATCH the daily limit of existing keys to match `profiles.yaml`, secrets unchanged | `OPENROUTER_MANAGEMENT_KEY` |
 | `brain upstream list` | `OPENROUTER_MANAGEMENT_KEY` |
-| `brain keys create --profile P --name N [--expires DATE] [--ip CIDRs]` / `keys list` / `keys revoke` | the SQLite file (run on the server) |
-| `brain usage snapshot` / `usage report [--days 7]` | `OPENROUTER_KEY_*` |
-| `brain setup claude-code [--profile dev] [--docker IMAGE]` | — |
-| `brain setup aider [--profile dev] [--docker IMAGE] [--proxy]` | — |
+| `brain keys create --profile P --name N [--expires DATE] [--ip CIDRs]` · `keys list [--profile P]` · `keys revoke --profile P --name N` | the SQLite file (run on the server) |
+| `brain usage snapshot` · `usage report [--days 7]` | `OPENROUTER_KEY_*` |
 | `brain models` — tier models with context, provider max output, effective cap, prices from the OpenRouter catalog | network |
-| `brain events ingest [--aider-chat FILE] [--claude-projects DIR]` | the tools' logs |
-| `brain events report [--days 7]` | — |
-| `brain bench run --tool aider\|claude\|opencode [--tier fast\|reasoning\|agent] [--docker IMAGE] [--via-proxy URL] [--only id]` — `--tier reasoning` runs aider in architect mode with the fast tier as editor; the settings file is passed if present | `OPENROUTER_KEY_BENCHMARK` |
+| `brain setup claude-code [--profile dev] [--proxy] [--docker IMAGE]` | — |
+| `brain setup aider [--profile dev] [--proxy] [--docker IMAGE]` | — |
 | `brain serve [--bind 127.0.0.1:8080] [--refresh 600] [--days 7]` — proxy (`/v1/*`, key auth) + board | `OPENROUTER_KEY_*` (upstream) |
+| `brain events ingest [--aider-chat FILE] [--claude-projects DIR]` · `events report [--days 7]` | the tools' logs |
+| `brain bench run --tool aider\|claude\|opencode [--tier fast] [--model ID] [--only id,…] [--profile benchmark] [--docker IMAGE] [--via-proxy URL] [--tasks DIR] [--cache DIR] [--logs DIR]` — `--tier reasoning` runs aider in architect mode with `fast` as editor; with `--via-proxy` the model defaults to `brain/<tier>` | `OPENROUTER_KEY_BENCHMARK`, or `BRAIN_BENCH_KEY` with `--via-proxy` |
 | `brain bench report [--run ID]` | — |
 
-Global flags: `--config DIR`, `--db FILE`. Env: `BRAIN_HOME`, `BRAIN_DB`, `BRAIN_DATA`.
+Global flags: `--config DIR`, `--db FILE`. Env: `BRAIN_HOME`, `BRAIN_DB`,
+`BRAIN_DATA`, `BRAIN_AIDER_ROOTS`, `BRAIN_CLAUDE_PROJECTS`, `BRAIN_BENCH_KEY`.

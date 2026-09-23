@@ -1,40 +1,31 @@
 flowchart LR
-    subgraph CLIENTS["Clients (no client changes)"]
-        CC["Claude Code<br/>ANTHROPIC_BASE_URL"]
-        AID["aider<br/>OPENAI_API_BASE"]
-        OC["OpenCode / Cline / Continue"]
-        APPS["GitHub apps<br/>assistant · find-a-car (first) · second-hand market (later)"]
-        AGO["agent-orchestrator<br/>(client: providers/openai.py with base_url)"]
+    subgraph CLIENTS["Clients (no client changes: base URL + brain_* key)"]
+        CC["Claude Code · px-claude<br/>ANTHROPIC_BASE_URL · brain/auto"]
+        AID["aider · px-aider<br/>OPENAI_API_BASE · architect/editor"]
+        OC["OpenCode (benchmarked)"]
+        APPS["apps<br/>find-a-car (car) · assistant · market (later)"]
+        AGO["agent-orchestrator (ago, not yet wired)"]
     end
 
-    subgraph BRAIN["llm_brain — single backend (FastAPI)"]
+    subgraph BRAIN["llm_brain — one Rust binary on the VPS (brain serve)"]
         direction TB
-        EP_A["/v1/messages<br/>(Anthropic dialect)"]
-        EP_O["/v1/chat/completions<br/>(OpenAI dialect)"]
-        TR["Translator<br/>single internal format<br/>(messages, tools, stream, cache hints)"]
-        POL["Policy / Profiles<br/>per client: default tier, budget, cache"]
-        RT["Tier router<br/>fast · medium · agent · max<br/>brain/auto: per-session decision (Jev)<br/>+ escalation on failure"]
-        CACHE["Cache manager<br/>L1 provider prompt cache<br/>L2 gateway response cache"]
-        USG["Usage / Budget<br/>SQLite · daily and monthly limit per profile"]
-        PV["providers/<br/>openrouter (today) · openai-compat · local (later)"]
+        EP_A["/v1/messages · count_tokens<br/>(Anthropic dialect)"]
+        EP_O["/v1/chat/completions · /v1/models<br/>(OpenAI dialect)"]
+        AUTH["Auth<br/>sha256(key) → profile · IP/expiry · rate limit"]
+        BUD["Budget ring 2<br/>70% fast only · 85% max_tokens cap · 100% 429"]
+        RT["Model resolution<br/>brain/&lt;tier&gt; · claude-* → tier<br/>brain/auto: tier per session (Jev)"]
+        SAN["Sanitizer + models[] fallback<br/>+ catalog max_tokens cap"]
+        TAP["Streaming tap<br/>usage · cost · serving backend → SQLite"]
+        BOARD["Board (/)<br/>spend · cache · providers · anomalies"]
     end
 
-    subgraph UPSTREAM["Upstream providers"]
-        OR["OpenRouter<br/>e.g. bonsai-2-27b (int4)"]
-        GG["Google Gemini"]
-        DS["DeepSeek"]
-        OL["Ollama / llama.cpp (local GPU)<br/>e.g. bonsai-2-27b GGUF 7 GB — same model"]
-        AN["Anthropic (premium tier only)"]
+    subgraph UPSTREAM["Upstream"]
+        OR["OpenRouter<br/>one key per profile, daily limit (ring 1)<br/>deepseek-v4-flash/pro · glm-5.3 · bonsai-2-27b"]
+        OL["local GPU (wish, Phase 3)"]
     end
 
     CC --> EP_A
-    AID --> EP_O
-    OC --> EP_O
-    APPS --> EP_O
-    AGO --> EP_O
-    EP_A --> TR
-    EP_O --> TR
-    TR --> POL --> RT
-    RT --> CACHE --> PV
-    RT -.-> USG
-    PV --> OR & GG & DS & OL & AN
+    AID & OC & APPS & AGO --> EP_O
+    EP_A & EP_O --> AUTH --> BUD --> RT --> SAN --> OR
+    OR --> TAP --> BOARD
+    SAN -.-> OL

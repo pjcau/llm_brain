@@ -2,29 +2,40 @@
 title: Cache logic and software
 ---
 
-# Cache logic: how it works and with which software
+# Cache logic: what the proxy does, and the L2 design
 
-Question: *"what software could I use? was the case where the client does
-no caching considered?"* Short answer: **the "client with no cache" case
-is the apps' case, and it is the main one**. Claude Code and aider have
-their own L0; apps via SDK send everything every time. For them all the
-logic lives in the layer.
+The layers themselves (L0–L3) and the measured findings are in
+[Cache layers](./cache.md). This page is the request flow: what is built
+today, and the pieces designed but not built.
 
-## What happens without a client that caches
+## What is built (Phase 1)
 
-An app sends the entire prompt on every request. Two problems and two
-answers:
+- **L1 pass-through.** The prefix is never reordered or rewritten; the
+  client's `cache_control` blocks reach the provider untouched (tested in
+  `proxy/sanitize.rs`). For the OpenAI dialect the proxy adds
+  `usage.include` so every response reports its cached tokens.
+- **Measurement.** Every request row stores cache-read and cache-write
+  tokens, cost and the serving backend; the board turns them into the
+  **Providers** and **Prompt cache** sections ([Cache layers](./cache.md#what-the-board-shows-from-v032)).
+- **Nothing else.** No `cache_control` insertion, no `session_id`, no
+  server-side system prompt (`config/prompts/` is empty), no L2.
 
-1. **The prefix repeats** (instructions, output schema, examples): if the
-   provider has a prompt cache, you pay 0.1×–0.5× **only if the prefix is
-   byte-identical and at the start**. An app that composes the system
-   prompt with f-strings and puts the date/time or user id in it breaks
-   the cache on every call. → The layer **keeps the system prompt per
-   profile**, versioned, and prepends it itself: the app sends only the
-   variable data.
+## The client that doesn't cache
+
+Claude Code and aider have their own L0 and send a stable prefix. **Apps
+via SDK are the main "no client cache" case**: they send the entire
+prompt on every request. Two problems, two answers:
+
+1. **The prefix repeats** (instructions, output schema, examples): the
+   provider cache pays off **only if the prefix is byte-identical and at
+   the start**. An app that puts the date or user id in its system prompt
+   breaks the cache on every call. Today's answer is app-side discipline
+   (static prefix first, variable data after). *Not built:* the layer
+   keeping a versioned system prompt per profile and prepending it, so
+   the app sends only the variable data.
 2. **The same question comes back** (assistant FAQ, same listing
-   reclassified): no provider knows. → **L2 in the layer**, exact or
-   semantic, per profile.
+   reclassified): no provider knows. → **L2 in the layer** (not built),
+   below.
 
 ## The decision flow
 
@@ -32,100 +43,63 @@ answers:
 ```mermaid
 flowchart TD
     A["Incoming request<br/>(profile, alias, system?, messages, tools, temperature)"] --> B{"Does the client send a system prompt?"}
-    B -- "no (app via SDK)" --> B1["The layer prepends the profile's<br/>versioned system prompt"]
-    B -- "yes (Claude Code, aider)" --> B2["Prefix left untouched,<br/>never reordered"]
-    B1 --> C["Normalize → key =<br/>sha256(profile, alias, system_v, tools, messages, temperature)"]
-    B2 --> C
-    C --> D{"Profile L2 policy"}
-    D -- "OFF (dev)" --> H
-    D -- "exact" --> E{"hit in SQLite<br/>and not expired?"}
+    B -- "no (app via SDK)" --> B1["NOT BUILT: the layer prepends the profile's<br/>versioned system prompt"]
+    B -- "yes (Claude Code, aider)" --> B2["Prefix left untouched,<br/>never reordered (built)"]
+    B1 --> D
+    B2 --> D
+    D{"Profile l2_cache policy<br/>(NOT BUILT: read, no effect today)"}
+    D -- "off (dev)" --> H
+    D -- "exact" --> E{"sha256(profile, alias, system_v, tools, messages, temperature)<br/>hit in SQLite and not expired?"}
     D -- "semantic" --> F{"neighbour with cos ≥ 0.95<br/>same namespace?"}
     E -- "yes" --> R1["Response from cache<br/>usage: cost=0, source=l2"]
     F -- "yes" --> R1
     E -- "no" --> H
     F -- "no" --> H
-    H["L1 — prepare the call"] --> H1{"Provider with explicit cache?<br/>(Anthropic, Gemini, Qwen)"}
-    H1 -- "yes" --> H2["Insert cache_control after<br/>system+tools and on the second-to-last turn<br/>(max 4 breakpoints)"]
-    H1 -- "no (OpenAI, DeepSeek, Grok, Groq…)" --> H3["Nothing to do:<br/>a stable prefix is enough"]
-    H2 --> I["session_id = profile+conversation<br/>→ OpenRouter sticky routing"]
-    H3 --> I
-    I --> J["Call"]
-    J --> K["Read usage.prompt_tokens_details:<br/>cached_tokens, cache_write_tokens, cache_discount"]
+    H["L1 — client's cache_control and prefix passed through (built)"] --> J["Call OpenRouter"]
+    J --> K["Read usage: cached / cache-write tokens,<br/>serving backend → requests row (built)"]
     K --> L{"Cacheable in L2?<br/>no tool_use, no error,<br/>no truncated stream, temp ≤ 0.3"}
-    L -- "yes" --> M["Write to L2 with the profile's TTL"]
+    L -- "yes" --> M["NOT BUILT: write to L2 with the profile's TTL"]
     L -- "no" --> N["Respond"]
     M --> N
 ```
 
-Fixed rules:
+Fixed rules (the built ones hold today, the rest bind L2 when it exists):
 
 - **Never reorder the prefix**: system, tools, skills first; variable
   content after. One moved line invalidates everything.
-- **For Claude Code (`dev` profile) the layer doesn't touch `system`**: the
-  attribution block must stay first and intact; server-side system
-  prompt prepending applies to apps only ([details](./client-compatibility.md)).
+- **For Claude Code (`dev`) the layer never touches `system`**: the
+  attribution block must stay first and intact; a server-side system
+  prompt would be for apps only ([details](./client-compatibility.md)).
+- **L2 always off for `dev`**: files change between requests.
 - **Don't cache in L2**: responses with `tool_use`, errors, truncated
   streams, requests with `temperature` > 0.3 (unless an explicit policy).
-- **L2 always OFF for `dev`**: files change between requests.
-- **Always** read `prompt_tokens_details` and save `cached_tokens` and
-  `cache_discount` in usage: without this you don't know whether the
-  cache works.
+- **Always record cached tokens** per request: without them you don't
+  know whether the cache works (built).
 
-## L1 — Prompt cache through OpenRouter (verified 2026-09-19)
+## L2 response cache: design (not built)
 
-| Provider | Mode | Write | Read |
-|----------|------|-------|------|
-| OpenAI, DeepSeek, Grok, Groq, Moonshot, Z.AI, Gemini 2.5 | **automatic** (prefix) | 1× (OpenAI 1.25×) | 0.1×–0.5× |
-| Anthropic | explicit: `cache_control` per block | 1.25× (5 min) / 2× (1 h) | 0.1× |
-| Gemini (explicit), Qwen | explicit: `cache_control` | 1.25× | 0.1×–0.25× |
+:::note Not built yet (Phase 2)
+`l2_cache: off | exact` is read from `profiles.yaml` and has no effect.
+:::
 
-- Hits reported in `usage.prompt_tokens_details.cached_tokens`,
-  `cache_write_tokens`, `cache_discount` (negative on writes).
-- **Sticky routing**: after a hit OpenRouter sends subsequent requests to
-  the same endpoint; controllable with `session_id` (expires after 10
-  min). The layer sets it to `profile+conversation`.
-- **Open models on third-party providers (e.g. bonsai on Darkbloom): not
-  documented.** To measure in Phase 0 with `cached_tokens`: if it's
-  always 0, that model has no L1 and the real cost is the full one.
+- **Exact** (`assistant`, `car`): a table in the same SQLite file, key =
+  sha256 of the normalized request (profile, alias, system version,
+  tools, messages, temperature), TTL per profile, response replayed with
+  `cost = 0` and marked as an L2 hit on the board. ~100 lines of Rust, no
+  new dependency.
+- **Semantic** (`assistant` only, later): `sqlite-vec` in the same file +
+  cheap embeddings, threshold cos ≥ 0.95, namespace = system prompt
+  version. It pays only if embedding cost ≪ saved response cost; for
+  listing classification an exact match on the listing id (L3, app side)
+  is simpler and safer.
 
-Software: **nothing to install**. It's the provider. The layer's job is a
-stable prefix + inserting `cache_control` where needed + `session_id`.
-agent-orchestrator's `providers/openrouter.py` already injects
-`cache_control` for the CLI's `cache_context`: that's the piece to
-extend.
+Rejected: Redis (one more service, not needed for one user), GPTCache and
+LiteLLM's cache (Python dependencies, out of the stack), Helicone /
+Portkey (one more hop, prompts leave to third parties).
 
-## L2 — Response cache: the options
+## What to measure
 
-| Option | Type | Pros | Cons |
-|--------|------|------|------|
-| **SQLite in llm_brain** (extend `core/cache.py`, InMemory today) | exact | ~100 lines, zero dependencies, key = normalized hash, TTL per profile | exact only |
-| Redis | exact | shared across processes, native TTL | one more service; not needed for a single user |
-| **GPTCache** (Python library) | semantic | pluggable: embedding + vector store + eviction policy | heavy dependency, not very active |
-| LiteLLM cache (in-memory / redis / redis-semantic) | exact + semantic | ready if you use LiteLLM | LiteLLM is out of Phase 0 |
-| Helicone / Portkey | exact via header | zero code | external proxy: one more hop and prompts leave to third parties |
-| **sqlite-vec + embeddings** | semantic | light, in-process, same SQLite file | to write: ~200 lines |
-
-For the semantic cache the embedding has a cost: it only pays if
-embedding cost ≪ saved response cost. With a cheap embedding model via
-OpenRouter or local (`sentence-transformers`, CPU) the math works for the
-assistant; for listing classification, exact match by `listing id` (L3,
-app side) is simpler and safer.
-
-## Recommendation
-
-| Layer | Phase | Choice |
-|-------|-------|--------|
-| L1 | 0 | OpenRouter, measuring `cached_tokens` for every candidate model |
-| L1 | 1 | server-side system prompt per profile + `cache_control` + `session_id` |
-| L2 exact | 1 | SQLite, extending `core/cache.py` with a persistent backend and a key from the normalized request; ON for `assistant`, `car`; OFF for `dev` |
-| L2 semantic | 2, `assistant` only | `sqlite-vec` + cheap embeddings; threshold 0.95; namespace = system prompt version |
-| External proxies | — | no: one more hop and data leaves |
-
-## What to measure to know it works
-
-- `cached_tokens / prompt_tokens` per profile and per model (target for
-  `dev`: > 60% with Claude Code, whose system prompt is large).
-- L2 hit rate for `assistant` (`core/cache.py` already has
-  `CacheStats.hit_rate`).
-- € saved = summed `cache_discount` + cost avoided by L2 hits.
-All three go in the dashboard next to the budget.
+- `cache read / prompt tokens` per profile, model and backend, and cold
+  turns per day — on the board today. The board flags the 7-day share
+  below 92 % and alarms below 80 %.
+- L2 hit rate and cost avoided, per profile — once L2 exists.

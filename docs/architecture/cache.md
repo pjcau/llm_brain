@@ -5,9 +5,16 @@ title: Cache layers
 # The cache layers: what they are and who owns them
 
 Key point: **not all caches are ours**, and they must be treated
-differently. This page says *what* the layers are; the decision flow, the
-case of clients with no cache, and the software options are in
-[Cache logic and software](./cache-logic.md).
+differently. This page owns the layer model and what has been measured;
+the request flow, what is built and the L2 design are in
+[Cache logic](./cache-logic.md).
+
+| Layer | Owner | Status |
+|-------|-------|--------|
+| L0 client session | Claude Code, aider | not ours |
+| L1 provider prompt cache | the backend that serves the turn | **the one that saves money**; the proxy passes it through and measures it |
+| L2 response cache | llm_brain | **not built** (`l2_cache:` in `profiles.yaml` is read, nothing caches) |
+| L3 application cache | each app | the app's domain |
 
 {/* diagram: 03-cache-layers */}
 ```mermaid
@@ -17,13 +24,13 @@ flowchart TB
         L0b["aider: repo map, chat history"]
     end
 
-    subgraph L2["L2 — Response cache (gateway, llm_brain)"]
+    subgraph L2["L2 — Response cache (llm_brain, designed, not built)"]
         L2a["Exact match: hash(normalized messages + model + tools) → response, TTL"]
         L2b["Semantic (optional, apps only): query embedding → similar response"]
         L2n["⚠ OFF for coding agents: files change, response goes stale"]
     end
 
-    subgraph L1["L1 — Provider prompt cache (translated by llm_brain)"]
+    subgraph L1["L1 — Provider prompt cache (cache hints passed through untouched)"]
         L1a["Anthropic: explicit cache_control on blocks"]
         L1b["OpenAI: automatic prefix cache"]
         L1c["Gemini: explicit context caching, with TTL and storage cost"]
@@ -40,7 +47,7 @@ flowchart TB
     end
 
     REQ["Request"] --> L0 --> L2
-    L2 -- miss --> L1 --> PROV["Provider (pinned per session: next step)"]
+    L2 -- miss --> L1 --> PROV["Provider (pinning per model: next step)"]
     L3 -. "the app decides before calling llm_brain" .-> REQ
 ```
 
@@ -52,23 +59,25 @@ on their own.
 ## L1 — Provider prompt cache
 
 The cache that **really saves money** in coding agents: system prompt +
-tools + skills (tens of KB) repeat identically every turn. Every provider
-does it its own way:
+tools + skills (tens of KB) and the growing history repeat identically
+every turn. Verified through OpenRouter on 2026-09-19:
 
-| Provider | Mechanism |
-|----------|-----------|
-| Anthropic | explicit `cache_control` on blocks |
-| OpenAI | automatic prefix cache |
-| DeepSeek | automatic on-disk context cache |
-| Gemini | explicit context caching, with TTL and storage cost |
-| OpenRouter | pass-through to the backend serving the turn — verified 2026-09-22; the backend can change between turns, see below |
-| Local (vLLM / llama.cpp) | prefix cache / KV cache: `none` strategy on the layer side |
+| Provider | Mode | Write | Read |
+|----------|------|-------|------|
+| OpenAI, DeepSeek, Grok, Groq, Moonshot, Z.AI, Gemini 2.5 | **automatic** (prefix) | 1× (OpenAI 1.25×) | 0.1×–0.5× |
+| Anthropic | explicit `cache_control` per block | 1.25× (5 min) / 2× (1 h) | 0.1× |
+| Gemini (explicit), Qwen | explicit `cache_control` | 1.25× | 0.1×–0.25× |
+| Local (vLLM / llama.cpp) | prefix / KV cache, nothing to do on the layer side | — | — |
 
-The translator must: accept hints in both dialects, translate or drop
-them, **never reorder the prefix** (system, tools, skills first; variable
-content after), and report cache hits in usage. If this piece is wrong,
-Claude Code behind the proxy costs double.
+On the tiers in use: `deepseek-v4-pro` and `v4-flash` cache
+automatically (a read costs about a tenth of full price); `bonsai-2-27b`
+has no prompt cache, one of the reasons it is not the daily driver.
 
+What the proxy does: it **never reorders or rewrites the prefix** —
+Claude Code's `cache_control` blocks pass through untouched — and it
+records cache-read and cache-write tokens plus the serving backend on
+every request row. It does not add `cache_control` or a `session_id` of
+its own (see [Cache logic](./cache-logic.md)).
 
 ### Which backend serves the turn (2026-09-22)
 
@@ -93,28 +102,23 @@ identical probe requests confirmed it directly: `StreamLake`, then
 OpenRouter names the backend in `provider`: at the top level of a
 non-streamed body and of an OpenAI chunk, and inside `message` in an
 Anthropic `message_start`. The proxy reads it in both dialects, streamed
-or not, and stores it on the request row; the board's **Providers** table
-shows requests, cache-hit share, prompt tokens paid at full price, cost
-and latency per backend.
+or not, and stores it on the request row.
 
-Pinning is the next step, not yet done: `provider.order` plus
-`allow_fallbacks` in the upstream body (OpenRouter has no sticky-session
-feature of its own). The measurement came first, and it says the scatter
-is between providers (see below), which is exactly what pinning
-addresses. Price is a second reason to choose: across those 16 endpoints
-input runs from $0.919 to $1.91 per M and cache reads from $0.0766 to
-$0.33 per M.
+**Pinning is the next step, not yet done**: `provider.order` plus
+`allow_fallbacks` in the upstream body. Price is a second reason to
+choose: across those 16 endpoints input runs from $0.919 to $1.91 per M
+and cache reads from $0.0766 to $0.33 per M.
 
 ### What the board shows (from v0.3.2)
 
-Two sections answer the question without a query. **Providers** lists who
-served each model, with the share of turns that reused the cache. **Prompt
-cache** turns it into money, per UTC day: requests, **cold turns** — a prompt
-of at least 5000 tokens that read *nothing* from cache, which is a prefix paid
-again rather than a new conversation — the share of prompt tokens served from
-cache, and an estimate of what those re-reads cost above the warm price: nine
-tenths of what those turns were actually billed (cache reads cost about a tenth
-of full price). It comes from recorded cost, not from catalog prices, which move.
+**Providers** lists who served each model, with the share of turns that
+reused the cache. **Prompt cache** turns it into money, per UTC day:
+requests, **cold turns** — a prompt of at least 5000 tokens that read
+*nothing* from cache, which is a prefix paid again rather than a new
+conversation — the share of prompt tokens served from cache, and an
+estimate of what those re-reads cost above the warm price: nine tenths of
+what those turns were actually billed. It comes from recorded cost, not
+from catalog prices, which move.
 
 First 45 minutes after the cutover (2026-09-22T17:24Z):
 
@@ -137,21 +141,23 @@ backend fragmentation with one forced tier migration. What the migration
 does *not* explain is the count: four backends for one model, which is the
 part pinning addresses.
 
-## L2 — Gateway response cache
+## L2 — Gateway response cache (not built)
 
 Useful for apps (assistant FAQs, repeated classifications), **harmful for
-coding** (files change between requests, the cached answer is stale). Per
-profile:
+coding** (files change between requests, the cached answer is stale).
+Policy per profile, already in `profiles.yaml` but without effect until L2
+exists:
 
-| Profile | L2 |
-|---------|----|
-| `dev` | OFF |
-| `assistant` | exact match ON |
-| `market` | semantic ON |
-| `car` | exact match ON |
+| Profile | `l2_cache` |
+|---------|-----------|
+| `dev`, `ago`, `benchmark` | `off` |
+| `assistant`, `car` | `exact` |
+| `market` (later) | semantic, planned |
+
+Design and software choice: [Cache logic](./cache-logic.md#l2-response-cache-design-not-built).
 
 ## L3 — Application
 
 The app's domain, not the layer's (listing classification by id, car
-valuation by model/year/km, FAQ). The layer can expose a helper (suggested
-cache key) so it isn't reinvented.
+valuation by model/year/km, FAQ): exact match on a domain key in the app
+is simpler and safer than anything the layer could guess.

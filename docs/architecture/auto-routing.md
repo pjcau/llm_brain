@@ -25,7 +25,7 @@ sequenceDiagram
     PX->>JV: state = first user message<br/>question "tier" (choice) · criteria = the ladder's `when`
     JV-->>PX: choice=medium · confidence 0.95 (~0.5 s, ~0.00002 $)
     PX->>SC: put(dev:h:s1 → medium)
-    PX->>OR: same request · model = glm-5.3-flash (+ fallback chain)
+    PX->>OR: same request · model = glm-5.3-flash
     OR-->>CC: stream
     Note over CC,PX: every later turn of the loop (tool results, retries…)
     CC->>PX: POST /v1/messages · model=brain/auto · same session id
@@ -80,6 +80,12 @@ have cost on the `baseline` tier (`agent`, what `px-claude` used before),
 so the saving is a number, not a feeling. Promotion or demotion of a rung
 follows the benchmark, as for any tier.
 
+First reading (2026-09-22, the first 7 real `dev` sessions): 4 on
+`agent`, 2 on `fast`, 1 on `medium` — **~$0 saved** against the `agent`
+baseline, because every session with real work in it was sent to
+`agent`. The bigger cost turned out to be cold prompt-cache turns, not
+the rung ([Cache layers](./cache.md#which-backend-serves-the-turn-2026-09-22)).
+
 ## One ladder per kind of client
 
 The global `router` in `tiers.yaml` is written for a coding agent (its
@@ -124,8 +130,8 @@ looks trivial ("call grep") is where a weak model emits the broken tool
 call that starts a retry loop. Deciding once from the human's request
 keeps the loop on one model and still sends the trivial *sessions* to the
 cheap rungs. The cases this misses — a session that starts light and turns
-heavy — are for escalation on failure (Phase 2) or `/model brain/agent` by
-hand.
+heavy — are for escalation on failure (Phase 2, [not built](./api-layer.md#escalation))
+or `/model brain/agent` by hand.
 
 Measured on 2026-09-22, on a live `px-claude` session whose prefix had
 grown to ~110k tokens (tier prices from `tiers.yaml`):
@@ -143,8 +149,8 @@ $2.44. What dominates is the cold *return*, and that is a backend-affinity
 problem, not a routing one — see [cache layers](./cache.md). With the
 prefix still warm on the way back, the break-even falls to about two
 turns and re-deciding per **task** (a new human message, not a tool
-result) becomes worth doing. Order of work: pin the backend first, then
-revisit the granularity.
+result) becomes worth doing. Order of work: pin the backend first (not
+done yet), then revisit the granularity.
 
 ## Alternatives checked
 

@@ -1,32 +1,29 @@
 flowchart LR
-    subgraph AO["agent-orchestrator (unchanged, becomes a client)"]
-        A1["providers/openai.py<br/>base_url = llm_brain, api_key = 'ago' profile"]
+    subgraph AO["agent-orchestrator (becomes a client)"]
+        A1["providers/openai.py<br/>base_url = llm_brain, api_key = brain_ago_…"]
         A2["dashboard, graph, agent runtime…<br/>unchanged"]
     end
 
-    subgraph REUSE["From agent-orchestrator: copy and adapt into llm_brain"]
-        R1["core/usage.py<br/>UsageRecord · BudgetConfig.max_per_day · UsageTracker"]
-        R2["core/cache.py<br/>BaseCache · CachePolicy · CacheStats → + SQLite backend"]
-        R3["providers/openrouter.py<br/>cache_control injection"]
-        R4["core/evaluator.py + evals_routes.py<br/>EvalCase · EvalSuite · compare"]
+    subgraph REUSE["Ideas ported (not code)"]
+        R1["core/usage.py<br/>per-day budget check"]
+        R2["core/cache.py<br/>cache policy · hit rate"]
+        R4["core/evaluator.py<br/>eval suite · compare"]
     end
 
-    subgraph NEW["llm_brain — its own repo"]
-        N1["api/openai_compat.py<br/>POST /v1/chat/completions · GET /v1/models"]
-        N2["api/anthropic_compat.py<br/>POST /v1/messages · count_tokens"]
-        N3["core/profiles.py<br/>api_key → profile: tier, daily/monthly budget, cache policy, versioned system prompt"]
-        N4["core/tiers.py<br/>brain/* aliases → (provider, model); claude-* → tier"]
-        N5["core/budget.py<br/>daily + monthly, 70/85/100 degradation, pre-call estimate"]
-        N6["core/cache_l2.py<br/>exact SQLite (semantic later)"]
-        N7["core/escalation.py<br/>failure → higher tier (Phase 2)"]
-        N8["bench/<br/>real-bug suite + cron + promotion"]
-        DB[("SQLite<br/>usage · budget · cache · eval")]
+    subgraph NEW["llm_brain — crates/brain/src"]
+        N1["proxy/mod.rs<br/>both dialects · auth chain · forward"]
+        N2["auth.rs · keys.rs<br/>client keys (hashed) · OpenRouter keys"]
+        N3["budget.rs<br/>daily + monthly, 70/85/100 rings"]
+        N4["proxy/route.rs<br/>brain/auto per session"]
+        N5["proxy/sanitize.rs · tap.rs · usage_parse.rs"]
+        N6["L2 response cache<br/>(designed, not built)"]
+        N8["bench/<br/>real-bug suite (nightly promotion: Phase 2)"]
+        DB[("SQLite<br/>requests · keys · usage · events · bench")]
     end
 
     A1 --> N1
-    N1 & N2 --> N3 --> N5 --> N4 --> N6
-    R1 -.-> N5
+    N1 --> N2 --> N3 --> N4 --> N5
+    R1 -.-> N3
     R2 -.-> N6
-    R3 -.-> N4
     R4 -.-> N8
-    N5 & N6 & N8 --> DB
+    N5 & N8 --> DB

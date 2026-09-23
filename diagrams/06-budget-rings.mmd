@@ -1,20 +1,18 @@
 flowchart TB
-    subgraph R3["Ring 3 — Client (informational)"]
-        C1["Claude Code: statusline / Stop hook shows today's spend"]
+    subgraph R3["Ring 3 — Client and board (informational)"]
+        C1["board: spend per day/month, projection vs soft caps"]
         C2["aider: cap on repo-map and chat-history tokens"]
     end
     subgraph R2["Ring 2 — llm_brain (soft, with degradation)"]
-        B1["daily AND monthly budget per profile (dev: 3 €/day, 30 €/month)"]
-        B2["pre-call estimate: input × price + max_tokens × price"]
-        B3["70% → fast tier only · 85% → reduced max_tokens · 100% → 429 with a clear message"]
-        B4["usage per profile → dashboard"]
+        B1["daily AND monthly budget per profile (dev: 5 $/day, 60 $/month soft)"]
+        B2["spend = sum of recorded request costs (OpenRouter's cost, else tier prices)"]
+        B3["70% → fast tier only · 85% → reduced max_tokens · 100% → 429, retry-after ≥ 3600"]
     end
     subgraph R1["Ring 1 — OpenRouter (hard, cannot be bypassed)"]
         O1["prepaid credits: negative balance = 402"]
-        O2["one key per profile with limit + limit_reset: daily (dev: 3 €)"]
-        O5["fixed monthly top-up (≈ 40 €) = hard monthly ceiling"]
-        O3["held-cost: requests that don't fit the balance are rejected up front"]
-        O4["GET /api/v1/key: usage_daily, limit_remaining"]
+        O2["one key per profile with limit + limit_reset: daily (dev: 5 $)"]
+        O5["fixed monthly top-up = hard monthly ceiling"]
+        O4["GET /api/v1/key: usage_daily, limit_remaining (usage snapshot)"]
     end
     R3 --> R2 --> R1
-    O4 -. "reconciliation" .-> B4
+    O4 -. "reconciliation on the board" .-> C1

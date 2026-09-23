@@ -1,26 +1,21 @@
 flowchart LR
-    subgraph LOCAL["Home (local network)"]
+    subgraph LOCAL["Home (laptop)"]
         CC["Claude Code · aider<br/>brain_dev_…"]
-        AST["assistant (stays local)<br/>brain_assistant_…"]
-        AGO["agent-orchestrator<br/>brain_ago_…"]
+        AST["assistant (local)<br/>brain_assistant_…"]
+        FAC["find-a-car (Docker)<br/>brain_car_…"]
     end
 
-    subgraph REMOTE["VPS / AWS"]
-        subgraph BRAIN["llm_brain (decided: on the VPS)"]
-            CADDY["Caddy: automatic HTTPS<br/>only /v1/*, per-key rate limit"]
-            API["FastAPI"]
-            DB[("SQLite<br/>usage · budget · keys · cache")]
-            ENV["secrets: sops+age → .env 0600<br/>or systemd LoadCredential"]
-        end
-        CAR["find-a-car (backend)<br/>brain_car_… from Secrets Manager / SSM or .env"]
-        SHM["second-hand market (backend)<br/>brain_market_…"]
-        LS["Litestream → S3/B2<br/>continuous SQLite replication"]
+    subgraph VPS["VPS (Contabo, x86_64)"]
+        CADDY["Caddy: Let's Encrypt on an sslip.io hostname<br/>/v1/* → proxy · board behind basic auth"]
+        API["brain serve (systemd, brain user)"]
+        DB[("SQLite<br/>requests · keys · usage · events")]
+        ENV[".env 0600<br/>OpenRouter keys per profile"]
     end
 
-    USERS["End users<br/>(browser / mobile)"] -- "the APP's auth<br/>(never llm_brain keys in the frontend)" --> CAR & SHM
-    CAR & SHM -- "HTTPS + Bearer brain_*<br/>+ user: <opaque id>" --> CADDY
-    CC & AST & AGO -- "HTTPS (or Tailscale)<br/>+ Bearer brain_*" --> CADDY
+    LS["Litestream → S3/B2<br/>(configured, not installed yet)"]
+    USERS["End users (later, public apps)"] -- "the APP's auth<br/>(never llm_brain keys in a frontend)" --> FAC
+    CC & AST & FAC -- "HTTPS + Bearer brain_*<br/>+ user: opaque id" --> CADDY
     CADDY --> API --> DB
     ENV --> API
-    DB --> LS
+    DB -.-> LS
     API -- "profile's OpenRouter key" --> OR["OpenRouter"]

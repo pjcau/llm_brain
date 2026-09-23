@@ -5,159 +5,134 @@ title: API layer
 # The API layer: what it abstracts and how
 
 One responsibility: receive requests in one of the two standard dialects
-and reply in the same dialect, deciding provider, model, cache and budget
-on its own. The client doesn't know what's behind it.
+and reply in the same dialect, deciding model and budget on its own. The
+client only changes its base URL and key; it doesn't know what's behind
+it. Today that is a key-authenticated **reverse proxy** in front of
+OpenRouter (`brain serve`, module `crates/brain/src/proxy/`).
 
 {/* diagram: 01-system-overview */}
 ```mermaid
 flowchart LR
-    subgraph CLIENTS["Clients (no client changes)"]
-        CC["Claude Code<br/>ANTHROPIC_BASE_URL"]
-        AID["aider<br/>OPENAI_API_BASE"]
-        OC["OpenCode / Cline / Continue"]
-        APPS["GitHub apps<br/>assistant · find-a-car (first) · second-hand market (later)"]
-        AGO["agent-orchestrator<br/>(client: providers/openai.py with base_url)"]
+    subgraph CLIENTS["Clients (no client changes: base URL + brain_* key)"]
+        CC["Claude Code · px-claude<br/>ANTHROPIC_BASE_URL · brain/auto"]
+        AID["aider · px-aider<br/>OPENAI_API_BASE · architect/editor"]
+        OC["OpenCode (benchmarked)"]
+        APPS["apps<br/>find-a-car (car) · assistant · market (later)"]
+        AGO["agent-orchestrator (ago, not yet wired)"]
     end
 
-    subgraph BRAIN["llm_brain — single backend (FastAPI)"]
+    subgraph BRAIN["llm_brain — one Rust binary on the VPS (brain serve)"]
         direction TB
-        EP_A["/v1/messages<br/>(Anthropic dialect)"]
-        EP_O["/v1/chat/completions<br/>(OpenAI dialect)"]
-        TR["Translator<br/>single internal format<br/>(messages, tools, stream, cache hints)"]
-        POL["Policy / Profiles<br/>per client: default tier, budget, cache"]
-        RT["Tier router<br/>fast · medium · agent · max<br/>brain/auto: per-session decision (Jev)<br/>+ escalation on failure"]
-        CACHE["Cache manager<br/>L1 provider prompt cache<br/>L2 gateway response cache"]
-        USG["Usage / Budget<br/>SQLite · daily and monthly limit per profile"]
-        PV["providers/<br/>openrouter (today) · openai-compat · local (later)"]
+        EP_A["/v1/messages · count_tokens<br/>(Anthropic dialect)"]
+        EP_O["/v1/chat/completions · /v1/models<br/>(OpenAI dialect)"]
+        AUTH["Auth<br/>sha256(key) → profile · IP/expiry · rate limit"]
+        BUD["Budget ring 2<br/>70% fast only · 85% max_tokens cap · 100% 429"]
+        RT["Model resolution<br/>brain/&lt;tier&gt; · claude-* → tier<br/>brain/auto: tier per session (Jev)"]
+        SAN["Sanitizer + models[] fallback<br/>+ catalog max_tokens cap"]
+        TAP["Streaming tap<br/>usage · cost · serving backend → SQLite"]
+        BOARD["Board (/)<br/>spend · cache · providers · anomalies"]
     end
 
-    subgraph UPSTREAM["Upstream providers"]
-        OR["OpenRouter<br/>e.g. bonsai-2-27b (int4)"]
-        GG["Google Gemini"]
-        DS["DeepSeek"]
-        OL["Ollama / llama.cpp (local GPU)<br/>e.g. bonsai-2-27b GGUF 7 GB — same model"]
-        AN["Anthropic (premium tier only)"]
+    subgraph UPSTREAM["Upstream"]
+        OR["OpenRouter<br/>one key per profile, daily limit (ring 1)<br/>deepseek-v4-flash/pro · glm-5.3 · bonsai-2-27b"]
+        OL["local GPU (wish, Phase 3)"]
     end
 
     CC --> EP_A
-    AID --> EP_O
-    OC --> EP_O
-    APPS --> EP_O
-    AGO --> EP_O
-    EP_A --> TR
-    EP_O --> TR
-    TR --> POL --> RT
-    RT --> CACHE --> PV
-    RT -.-> USG
-    PV --> OR & GG & DS & OL & AN
+    AID & OC & APPS & AGO --> EP_O
+    EP_A & EP_O --> AUTH --> BUD --> RT --> SAN --> OR
+    OR --> TAP --> BOARD
+    SAN -.-> OL
 ```
 
-## Components
+## What the proxy does to a request
 
-| Component | Responsibility | Note |
-|-----------|----------------|------|
-| **Endpoints** | `/v1/messages` (Anthropic), `/v1/chat/completions` + `/v1/models` (OpenAI) | SSE streaming in both dialects |
-| **Translator** | dialect → single internal format → provider dialect | The most delicate piece: tool schema, stream, thinking, cache hints |
-| **Profiles** | api_key → profile: default tier, budget, cache policy | One per client: `dev`, `market`, `car`, `assistant` |
-| **Tier router** | `brain/*` and `claude-*` aliases → tier → (provider, model) from `tiers.yaml`; `brain/auto` → rung chosen once per session by a decision model | [Auto routing](./auto-routing.md); no per-turn classifier ([why](#routing-by-task-weight)) |
-| **Escalation** | failure signal → retry on a higher tier | v2 |
-| **Cache manager** | L1 (provider prompt cache, translated) + L2 (response cache) | [Cache](./cache.md) |
-| **Usage** | tokens, cache hits, cost, per profile, daily and monthly | `usage.py` ported to `usage.rs` + SQLite |
+In order, as in `proxy/mod.rs` (Phase 1, live since 2026-09-20):
 
-## Translator: the main technical risk (deferred)
+| Step | What happens | Code |
+|------|--------------|------|
+| **Endpoints** | `/v1/messages` + `/v1/messages/count_tokens` (Anthropic), `/v1/chat/completions` + `/v1/models` (OpenAI); errors always in the client's dialect | `proxy/mod.rs` |
+| **Auth** | `brain_<profile>_…` key → sha256 lookup → profile; expiry, IP allowlist, per-key/per-user rate limit, IP block after repeated failures | `auth.rs`, [Auth flow](./auth-flow.md) |
+| **Model resolution** | `brain/<tier>` → the tier's model; `claude-*`, `sonnet`, `opus`, `haiku` or no model → the profile's default tier; a configured model id → its tier; any other `vendor/model` passes as-is | `proxy/sanitize.rs` |
+| **`brain/auto`** | tier chosen once per session by a decision model | `proxy/route.rs`, [Auto routing](./auto-routing.md) |
+| **Budget (ring 2)** | spend today / this month vs the profile's limits: 70% → `fast`, 85% → `max_tokens` cap, 100% → 429 | `budget.rs`, [Budget](./budget.md) |
+| **Output cap** | `max_tokens` capped to the smaller of the provider's max (OpenRouter catalog, refreshed hourly) and the tier's `max_output_tokens` | `catalog.rs` |
+| **Shaping** | Anthropic: the sanitizer drops the fields non-Claude models reject and turns mid-conversation `system` turns into user turns ([why](./client-compatibility.md)); OpenAI: adds the tier's `models[]` fallback chain and `usage.include` (the Anthropic dialect gets no fallback chain today) | `proxy/sanitize.rs` |
+| **Forward** | to OpenRouter with the profile's own upstream key; `anthropic-version`, `anthropic-beta` passed through; bodies are bytes, streams are never buffered | `proxy/mod.rs` |
+| **Record** | a tap on the stream reads usage, cost and the serving backend, one row per request (refusals too) → board | `proxy/tap.rs`, `proxy/usage_parse.rs` |
 
-:::tip Update
-OpenRouter natively exposes both `/api/v1/chat/completions` and
-`/api/v1/messages` (Anthropic format, verified). In Phase 1 the layer is
-therefore an **aware reverse proxy** (profile, alias, budget, usage) and
-passes formats through as they are. The list below applies when a
-non-compatible provider joins. See [Stack](../analysis/stack.md).
-:::
+There is **no translator**: OpenRouter natively serves both
+`/api/v1/chat/completions` and `/api/v1/messages`, so each dialect goes
+through unchanged apart from the shaping above ([Stack](../analysis/stack.md)).
+A translator (tool calls ↔ function calling, SSE events, `thinking` ↔
+`reasoning_content`, `cache_control`) only becomes necessary if a
+provider that speaks neither dialect joins; claude-code-router and
+LiteLLM already have that mapping.
 
-It must faithfully handle:
+## Exposed aliases
 
-- SSE streaming with the Anthropic events (`message_start`,
-  `content_block_delta`, `content_block_stop`, `message_delta`…)
-- `tool_use` / `tool_result` blocks ↔ OpenAI function calling
-- `system` as an array of blocks with `cache_control`
-- `thinking` blocks ↔ `reasoning_content` (DeepSeek) or dropped
-- `POST /v1/messages/count_tokens` (Claude Code calls it)
-- `anthropic-beta`, `anthropic-version` headers (accept and ignore)
-- `claude-*` model ids sent by the client → tier (Claude Code uses one
-  model for "haiku" tasks and one for the main: both must be mapped)
-
-Not to be written from scratch: claude-code-router and LiteLLM already
-have the mapping. See [decisions](../decisions.md).
-
-## Escalation
-
-The best routing signal is not "how complex the request looks" (regex)
-but **the failure of the lower tier**:
-
-- **aider**: with `--auto-test` it feeds the failing test output back to
-  the model; the layer recognizes the pattern and raises the tier.
-- **Claude Code**: a `PostToolUse` hook on failing tests/lint can mark the
-  next request (header or prefix) to force `reasoning`.
-- **manual**: `/model reasoning` in aider, `brain/reasoning` alias from
-  `/v1/models`.
+`/v1/models` returns `brain/auto` (with its rungs), a `brain/<tier>`
+alias for each configured tier (`fast`, `reasoning`, `medium`, `agent`,
+`max`) and the tiers' concrete model ids. Changing the model behind an
+alias touches no client.
 
 ## Routing by task weight
 
 *"A strong model for a grep is a waste: can the layer pick the model per
-action?"* Three levels, from what exists to what is deliberately not done:
+action?"* What exists, and what is deliberately not done:
 
-1. **Per role, client-side (done).** Claude Code already runs two models:
-   the main one for the conversation and a "haiku" one for background
-   work (summaries, titles, the `Explore` subagent). `px-claude` maps them
-   to `brain/agent` and `brain/fast`; a subagent can name its own model.
-   OpenCode and aider (`--architect` / `--editor-model`) split the same
-   way. This is where the cheap model belongs: a whole cheap
-   sub-conversation, not a cheap turn in the middle of an expensive one.
-2. **Per session, in the proxy (done: `brain/auto`).** A decision model
-   (Jev) reads the *first* user message and picks a rung of the ladder
-   (`fast` → `medium` → `agent` → `max`); the choice sticks to the session.
-   → [Auto routing](./auto-routing.md)
-3. **Per request, in the proxy (rejected).** A classifier on every turn,
-   as claude-code-router and `openrouter/auto` do, pays twice in an agent
-   loop: each model has its own prompt cache, so switching mid-loop
-   re-reads the 60 KB system prompt at full price; and the turn that
-   *looks* light — "call grep" — is the one where a weak model produces
-   a broken tool call and starts the retry loop the `agent` tier was
-   introduced to stop. The grep itself runs on the laptop for free; what
-   is paid is the decision to run it, and that needs the context.
-4. **Escalation on failure (Phase 2, above).** The reliable signal is the
-   outcome, not the look of the request: start cheap, raise the tier when
-   tests or tool calls fail — the ladder makes the next rung obvious.
+1. **Per role, client-side (done).** Claude Code runs a main model and a
+   "haiku" one for background work (summaries, titles, `Explore`):
+   `px-claude` maps them to `brain/auto` and `brain/fast`. aider splits
+   architect / editor the same way. The cheap model belongs to a whole
+   cheap sub-conversation, not to a cheap turn inside an expensive one.
+2. **Per session, in the proxy (done: `brain/auto`).** → [Auto routing](./auto-routing.md)
+3. **Per request (rejected).** A classifier on every turn pays twice in an
+   agent loop: each model has its own prompt cache, so switching re-reads
+   the whole prefix at full price, and the turn that *looks* light ("call
+   grep") is where a weak model breaks the tool call. Numbers in
+   [Auto routing](./auto-routing.md#why-per-session-and-not-per-turn).
+4. **Escalation on failure (not built)**, below.
 
 Measured on `ago-0001` ([Phase 1](../phase-1.md#agents-compared-through-the-proxy)):
 Claude Code needs `agent` for a reliable loop, OpenCode solves the same
 task on `fast` at 1/30 of the cost. Changing the *tool* moved the cost
 more than any per-turn routing could.
 
+## Escalation
+
+:::note Not built yet (Phase 2)
+:::
+
+The reliable signal is the **failure of the lower tier**, not how the
+request looks: start cheap, move up a rung of the ladder when tests or
+tool calls fail.
+
+- **aider**: `--auto-test` feeds failing test output back; the layer
+  would recognise it and raise the tier.
+- **Claude Code**: a `PostToolUse` hook on failing tests/lint could mark
+  the next request (header) to force a higher tier.
+- **Manual (works today)**: `/model brain/agent` in Claude Code, `/model`
+  in aider, or `ANTHROPIC_MODEL=brain/agent px-claude`.
+
 ## Provider routing (Exacto)
 
 The tier picks the **model**; OpenRouter picks the **provider** that
-serves it (16 for `deepseek-v4-pro`, from 0.96 to 1.91 $/M input). The
-default order is by price, and some providers serve the same open model
-with broken tool calls (truncated JSON arguments, missing calls): the
-agent retries or loops. **Exacto** is a provider sort by measured
-tool-call accuracy, not a different model:
+serves it (16 for `deepseek-v4-pro`, from 0.96 to 1.91 $/M input). Some
+providers serve the same open model with broken tool calls (truncated
+JSON arguments, missing calls). **Exacto** sorts providers by measured
+tool-call accuracy:
 
-- **Auto Exacto** is on by default since 2026-03 for every request that
-  contains `tools` — every Claude Code and OpenCode turn — as long as the
-  request sets no explicit `provider.sort`, which the proxy never does.
-- `model:exacto` forces it on a given model (also on requests without
-  tools) and still works with the `models` fallback chain; the catalog
-  lookup strips the suffix. `ANTHROPIC_MODEL=deepseek/deepseek-v4-pro:exacto
-  px-claude` tries it with no config change; `model:` in `tiers.yaml`
-  makes it the default.
+- **Auto Exacto** is on by default for every request that carries
+  `tools` — every Claude Code and OpenCode turn — as long as the request
+  sets no `provider.sort`, which the proxy never does.
+- `model:exacto` forces it on one model (also without tools) and works
+  with the `models` fallback chain; the catalog lookup strips the suffix.
+  `ANTHROPIC_MODEL=deepseek/deepseek-v4-pro:exacto px-claude` tries it
+  with no config change; `model:` in `tiers.yaml` makes it the default.
 - The cost is that a quality-sorted provider may not be the cheapest.
 
-A/B on `ago-0001` (2026-09-22, Claude Code through the proxy, two runs
-each) is in [Phase 1](../phase-1.md#agents-compared-through-the-proxy).
-
-## Exposed aliases
-
-`/v1/models` returns stable aliases, not models: `brain/fast`,
-`brain/reasoning`, `brain/premium`. Changing the model behind an alias
-touches no client.
+The proxy records which backend served each request; pinning one per
+model (`provider.order`) is the next step, because the prompt cache lives
+in the backend ([Cache](./cache.md#which-backend-serves-the-turn-2026-09-22)).
+A/B of `:exacto` on `ago-0001` is in [Phase 1](../phase-1.md#agents-compared-through-the-proxy).

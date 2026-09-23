@@ -2,74 +2,70 @@
 title: agent-orchestrator — what to reuse
 ---
 
-# agent-orchestrator: from backend to client, and what to reuse
+# agent-orchestrator: from backend to client, and what was reused
 
 Decision (2026-09-19): **llm_brain is a single, standalone backend**;
 agent-orchestrator does not contain it, **it uses it**, like the apps.
-Reason: centralize every LLM request in one place (budget, cache, usage),
-independent of who makes it.
+Reason: every LLM request in one place (budget, cache, usage), whoever
+makes it.
 
 Repo: [pjcau/agent-orchestrator](https://github.com/pjcau/agent-orchestrator),
-verified on the code (clone of 2026-09-19).
+read on the code (clone of 2026-09-19).
 
-## How agent-orchestrator becomes a client
+## How agent-orchestrator becomes a client (not wired yet)
 
-`providers/openai.py` with `base_url = llm_brain` and the `ago` profile's
-`api_key`. Everything else (dashboard, graph, agent runtime) is unchanged.
-Its `providers/openrouter.py` becomes redundant: only llm_brain sees
-OpenRouter.
+`providers/openai.py` with `base_url` = llm_brain and a client key of the
+`ago` profile (1 $/day, 5 $/month). Everything else (dashboard, graph,
+agent runtime) is unchanged; its `providers/openrouter.py` becomes
+redundant. Tracked on the [roadmap](../roadmap.md) (Phase 1.x) and in
+[Apps](../architecture/apps.md).
 
-## What to port into llm_brain (don't depend on it)
+## What was taken from it
 
-Standalone means standalone — and llm_brain is [in Rust](./stack.md), so
-the useful modules are **ported**, not imported. They are small; the
-value is in their data model and thresholds, not in the Python.
+llm_brain is [in Rust](./stack.md), so nothing is imported: the modules
+were small, and what carried over is their data model and thresholds.
 
-| Module | Lines | What it gives | What's missing |
-|--------|-------|---------------|----------------|
-| `core/usage.py` | 287 | `UsageRecord`, `BudgetConfig.max_per_day`, `UsageTracker.check_budget` | per-profile, monthly, SQLite persistence, degradation |
-| `core/cache.py` | 327 | `BaseCache`, `CachePolicy`, `CacheStats.hit_rate`, `InMemoryCache` | SQLite backend, key from the normalized request |
-| `providers/openrouter.py` | — | `cache_control` injection for cacheable prefixes | reading `cached_tokens`, `session_id` |
-| `core/evaluator.py` + `dashboard/evals_routes.py` | 584 + 267 | `EvalCase`/`EvalSuite`, `POST /api/evals/run`, `compare` | "run the tests" verifier, report persistence, cron |
-| `core/router.py` | — | regex classifier | not needed in Phase 1 (routing by alias + escalation) |
+| agent-orchestrator | Became in llm_brain | Status |
+|--------------------|---------------------|--------|
+| `core/usage.py` — `UsageRecord`, `BudgetConfig.max_per_day`, `check_budget` | `budget.rs` (per-profile daily/monthly, degradation) + `proxy/usage_parse.rs`, SQLite `requests` | built |
+| `providers/openrouter.py` — `cache_control` injection, usage parsing | `proxy/usage_parse.rs` reads `cached_tokens` and `usage.cost`; `cache_control` is left to the clients, which already send it | built (no injection) |
+| `core/evaluator.py` + `evals_routes.py` — `EvalCase`/`EvalSuite`, `compare` | `bench/`: real-bug tasks verified by the repo's own tests, not an LLM judge | built; nightly cron + promotion not yet |
+| `core/cache.py` — `BaseCache`, `CachePolicy`, `CacheStats` | the L2 response cache ([cache](../architecture/cache.md)) | **not built** (only the `l2_cache` profile field) |
+| `core/router.py` — regex classifier | replaced by [`brain/auto`](../architecture/auto-routing.md) (decision model per session) | not ported |
 
-## What exists nowhere (grep over all of `src/`: zero matches)
-
-- `POST /v1/chat/completions`, `POST /v1/messages`: the two dialects. They
-  are the heart of llm_brain and must be written.
+The two dialects (`POST /v1/chat/completions`, `POST /v1/messages`)
+existed nowhere in agent-orchestrator and were written from scratch
+(`proxy/`).
 
 {/* diagram: 05-agent-orchestrator-modules */}
 ```mermaid
 flowchart LR
-    subgraph AO["agent-orchestrator (unchanged, becomes a client)"]
-        A1["providers/openai.py<br/>base_url = llm_brain, api_key = 'ago' profile"]
+    subgraph AO["agent-orchestrator (becomes a client)"]
+        A1["providers/openai.py<br/>base_url = llm_brain, api_key = brain_ago_…"]
         A2["dashboard, graph, agent runtime…<br/>unchanged"]
     end
 
-    subgraph REUSE["From agent-orchestrator: copy and adapt into llm_brain"]
-        R1["core/usage.py<br/>UsageRecord · BudgetConfig.max_per_day · UsageTracker"]
-        R2["core/cache.py<br/>BaseCache · CachePolicy · CacheStats → + SQLite backend"]
-        R3["providers/openrouter.py<br/>cache_control injection"]
-        R4["core/evaluator.py + evals_routes.py<br/>EvalCase · EvalSuite · compare"]
+    subgraph REUSE["Ideas ported (not code)"]
+        R1["core/usage.py<br/>per-day budget check"]
+        R2["core/cache.py<br/>cache policy · hit rate"]
+        R4["core/evaluator.py<br/>eval suite · compare"]
     end
 
-    subgraph NEW["llm_brain — its own repo"]
-        N1["api/openai_compat.py<br/>POST /v1/chat/completions · GET /v1/models"]
-        N2["api/anthropic_compat.py<br/>POST /v1/messages · count_tokens"]
-        N3["core/profiles.py<br/>api_key → profile: tier, daily/monthly budget, cache policy, versioned system prompt"]
-        N4["core/tiers.py<br/>brain/* aliases → (provider, model); claude-* → tier"]
-        N5["core/budget.py<br/>daily + monthly, 70/85/100 degradation, pre-call estimate"]
-        N6["core/cache_l2.py<br/>exact SQLite (semantic later)"]
-        N7["core/escalation.py<br/>failure → higher tier (Phase 2)"]
-        N8["bench/<br/>real-bug suite + cron + promotion"]
-        DB[("SQLite<br/>usage · budget · cache · eval")]
+    subgraph NEW["llm_brain — crates/brain/src"]
+        N1["proxy/mod.rs<br/>both dialects · auth chain · forward"]
+        N2["auth.rs · keys.rs<br/>client keys (hashed) · OpenRouter keys"]
+        N3["budget.rs<br/>daily + monthly, 70/85/100 rings"]
+        N4["proxy/route.rs<br/>brain/auto per session"]
+        N5["proxy/sanitize.rs · tap.rs · usage_parse.rs"]
+        N6["L2 response cache<br/>(designed, not built)"]
+        N8["bench/<br/>real-bug suite (nightly promotion: Phase 2)"]
+        DB[("SQLite<br/>requests · keys · usage · events · bench")]
     end
 
     A1 --> N1
-    N1 & N2 --> N3 --> N5 --> N4 --> N6
-    R1 -.-> N5
+    N1 --> N2 --> N3 --> N4 --> N5
+    R1 -.-> N3
     R2 -.-> N6
-    R3 -.-> N4
     R4 -.-> N8
-    N5 & N6 & N8 --> DB
+    N5 & N8 --> DB
 ```

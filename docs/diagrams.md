@@ -12,45 +12,36 @@ Mermaid sources in `diagrams/*.mmd`. After editing a source:
 {/* diagram: 01-system-overview */}
 ```mermaid
 flowchart LR
-    subgraph CLIENTS["Clients (no client changes)"]
-        CC["Claude Code<br/>ANTHROPIC_BASE_URL"]
-        AID["aider<br/>OPENAI_API_BASE"]
-        OC["OpenCode / Cline / Continue"]
-        APPS["GitHub apps<br/>assistant · find-a-car (first) · second-hand market (later)"]
-        AGO["agent-orchestrator<br/>(client: providers/openai.py with base_url)"]
+    subgraph CLIENTS["Clients (no client changes: base URL + brain_* key)"]
+        CC["Claude Code · px-claude<br/>ANTHROPIC_BASE_URL · brain/auto"]
+        AID["aider · px-aider<br/>OPENAI_API_BASE · architect/editor"]
+        OC["OpenCode (benchmarked)"]
+        APPS["apps<br/>find-a-car (car) · assistant · market (later)"]
+        AGO["agent-orchestrator (ago, not yet wired)"]
     end
 
-    subgraph BRAIN["llm_brain — single backend (FastAPI)"]
+    subgraph BRAIN["llm_brain — one Rust binary on the VPS (brain serve)"]
         direction TB
-        EP_A["/v1/messages<br/>(Anthropic dialect)"]
-        EP_O["/v1/chat/completions<br/>(OpenAI dialect)"]
-        TR["Translator<br/>single internal format<br/>(messages, tools, stream, cache hints)"]
-        POL["Policy / Profiles<br/>per client: default tier, budget, cache"]
-        RT["Tier router<br/>fast · medium · agent · max<br/>brain/auto: per-session decision (Jev)<br/>+ escalation on failure"]
-        CACHE["Cache manager<br/>L1 provider prompt cache<br/>L2 gateway response cache"]
-        USG["Usage / Budget<br/>SQLite · daily and monthly limit per profile"]
-        PV["providers/<br/>openrouter (today) · openai-compat · local (later)"]
+        EP_A["/v1/messages · count_tokens<br/>(Anthropic dialect)"]
+        EP_O["/v1/chat/completions · /v1/models<br/>(OpenAI dialect)"]
+        AUTH["Auth<br/>sha256(key) → profile · IP/expiry · rate limit"]
+        BUD["Budget ring 2<br/>70% fast only · 85% max_tokens cap · 100% 429"]
+        RT["Model resolution<br/>brain/&lt;tier&gt; · claude-* → tier<br/>brain/auto: tier per session (Jev)"]
+        SAN["Sanitizer + models[] fallback<br/>+ catalog max_tokens cap"]
+        TAP["Streaming tap<br/>usage · cost · serving backend → SQLite"]
+        BOARD["Board (/)<br/>spend · cache · providers · anomalies"]
     end
 
-    subgraph UPSTREAM["Upstream providers"]
-        OR["OpenRouter<br/>e.g. bonsai-2-27b (int4)"]
-        GG["Google Gemini"]
-        DS["DeepSeek"]
-        OL["Ollama / llama.cpp (local GPU)<br/>e.g. bonsai-2-27b GGUF 7 GB — same model"]
-        AN["Anthropic (premium tier only)"]
+    subgraph UPSTREAM["Upstream"]
+        OR["OpenRouter<br/>one key per profile, daily limit (ring 1)<br/>deepseek-v4-flash/pro · glm-5.3 · bonsai-2-27b"]
+        OL["local GPU (wish, Phase 3)"]
     end
 
     CC --> EP_A
-    AID --> EP_O
-    OC --> EP_O
-    APPS --> EP_O
-    AGO --> EP_O
-    EP_A --> TR
-    EP_O --> TR
-    TR --> POL --> RT
-    RT --> CACHE --> PV
-    RT -.-> USG
-    PV --> OR & GG & DS & OL & AN
+    AID & OC & APPS & AGO --> EP_O
+    EP_A & EP_O --> AUTH --> BUD --> RT --> SAN --> OR
+    OR --> TAP --> BOARD
+    SAN -.-> OL
 ```
 
 ## 2. Flow of a request from Claude Code (hooks and skills)
@@ -62,31 +53,26 @@ sequenceDiagram
     actor U as User
     participant CC as Claude Code (CLI, local)
     participant H as Hooks / Skills / MCP (local)
-    participant EP as llm_brain /v1/messages
-    participant TR as Translator
-    participant RT as Tier router
-    participant C as Cache
-    participant P as Provider (fast)
-    participant R as Provider (reasoning)
+    participant PX as llm_brain /v1/messages
+    participant JV as Jev (decision model)
+    participant OR as OpenRouter (Anthropic dialect)
 
     U->>CC: prompt
     CC->>H: UserPromptSubmit hook, skill match (all local)
     H-->>CC: enriched context (skill md, CLAUDE.md)
-    CC->>EP: POST /v1/messages<br/>model=claude-*, system[cache_control], tools[], stream=true
-    EP->>TR: normalize (Anthropic → internal format)
-    TR->>RT: request + client profile "claude-code"
-    RT->>RT: model claude-* → tier (fast by default)
-    RT->>C: L2 lookup (request hash) — miss for coding
-    C->>P: call with cache hint translated for the provider
-    P-->>TR: stream (provider-format chunks)
-    TR-->>CC: Anthropic SSE (message_start, content_block_delta, tool_use…)
+    CC->>PX: POST /v1/messages<br/>model=brain/auto, system[cache_control], tools[], stream=true
+    PX->>PX: key → profile dev · rate limit · budget ring
+    PX->>JV: first turn of the session only: which rung?
+    JV-->>PX: e.g. agent → deepseek-v4-pro
+    PX->>PX: sanitize (unsupported fields, mid-conversation system turns → user)<br/>system untouched · max_tokens cap (models[] fallback: OpenAI dialect only)
+    PX->>OR: same Anthropic request, profile's OpenRouter key
+    OR-->>CC: Anthropic SSE passed through unbuffered (tap reads usage)
     CC->>H: PreToolUse hook → runs tool locally → PostToolUse hook
-    CC->>EP: POST /v1/messages (tool_result)
-    Note over RT,R: Escalation: if the client signals failure<br/>(tests/lint KO, or explicit /model reasoning)<br/>the router sends it to the reasoning tier
-    RT->>R: same request, reasoning tier
-    R-->>CC: response via TR
+    CC->>PX: POST /v1/messages (tool_result), same session id
+    PX->>OR: same tier as the first turn — prompt cache stays warm
+    OR-->>CC: stream
     CC->>H: Stop hook
-    RT-->>EP: usage (tokens, cache hits, cost) → dashboard
+    PX-->>PX: request row: tokens, cache read, cost, backend → board
 ```
 
 ## 3. Cache layers
@@ -99,13 +85,13 @@ flowchart TB
         L0b["aider: repo map, chat history"]
     end
 
-    subgraph L2["L2 — Response cache (gateway, llm_brain)"]
+    subgraph L2["L2 — Response cache (llm_brain, designed, not built)"]
         L2a["Exact match: hash(normalized messages + model + tools) → response, TTL"]
         L2b["Semantic (optional, apps only): query embedding → similar response"]
         L2n["⚠ OFF for coding agents: files change, response goes stale"]
     end
 
-    subgraph L1["L1 — Provider prompt cache (translated by llm_brain)"]
+    subgraph L1["L1 — Provider prompt cache (cache hints passed through untouched)"]
         L1a["Anthropic: explicit cache_control on blocks"]
         L1b["OpenAI: automatic prefix cache"]
         L1c["Gemini: explicit context caching, with TTL and storage cost"]
@@ -122,7 +108,7 @@ flowchart TB
     end
 
     REQ["Request"] --> L0 --> L2
-    L2 -- miss --> L1 --> PROV["Provider (pinned per session: next step)"]
+    L2 -- miss --> L1 --> PROV["Provider (pinning per model: next step)"]
     L3 -. "the app decides before calling llm_brain" .-> REQ
 ```
 
@@ -131,75 +117,66 @@ flowchart TB
 {/* diagram: 04-app-integration */}
 ```mermaid
 flowchart LR
-    subgraph APPS["Existing apps (GitHub)"]
-        SHM["Second-hand market (later)<br/>listing classification, descriptions, moderation"]
-        FAC["Find-a-car second hand (first)<br/>valuation, comparison, extraction from listings"]
-        AST["Assistant (first)<br/>conversational chat, RAG"]
-        AGO["agent-orchestrator<br/>openai-compat provider"]
-        DEV["Dev tooling<br/>Claude Code · aider"]
+    subgraph APPS["Clients"]
+        FAC["find-a-car (integrated)<br/>skills run claude via the proxy"]
+        AST["assistant (key issued)<br/>chat, RAG"]
+        SHM["second-hand market (later)"]
+        AGO["agent-orchestrator (not yet wired)"]
+        DEV["Dev tooling<br/>Claude Code · aider · OpenCode"]
     end
 
     subgraph SDK["How they integrate"]
-        S1["Official OpenAI SDK<br/>base_url = llm_brain<br/>api_key = per-app key"]
-        S2["X-Brain-Profile header<br/>or api_key → profile"]
+        S1["Official SDK<br/>base_url = llm_brain<br/>api_key = brain_&lt;profile&gt;_…"]
+        S2["user = opaque end-user id<br/>x-brain-session = conversation (brain/auto)"]
     end
 
-    subgraph BRAIN["llm_brain"]
-        PRF["Per-client profiles"]
-        P1["profile: market<br/>fast tier · L2 semantic ON · budget 5€/m"]
-        P2["profile: car<br/>fast + reasoning for valuations · budget 10€/m"]
-        P3["profile: assistant<br/>fast tier · L2 exact ON · streaming"]
-        P4["profile: dev<br/>fast tier, reasoning escalation · L2 OFF · 3€/day, 30€/m"]
-        P5["profile: ago<br/>like dev, own budget"]
-        USG["Usage per profile → llm_brain dashboard"]
+    subgraph BRAIN["llm_brain profiles (config/profiles.yaml)"]
+        P1["car<br/>fast · 0.50 $/day · 15 $/m soft"]
+        P2["assistant<br/>own brain/auto ladder · 0.50 $/day · 15 $/m soft"]
+        P3["dev<br/>brain/auto via px-claude · 5 $/day · 60 $/m soft"]
+        P4["ago<br/>1 $/day · 5 $/m soft"]
+        P5["benchmark<br/>0.50 $/day · 5 $/m soft"]
+        USG["requests table → board"]
     end
 
-    SHM --> S1
-    FAC --> S1
-    AST --> S1
-    DEV --> S1
-    AGO --> S1
-    S1 --> S2 --> PRF
-    PRF --> P1 & P2 & P3 & P4 & P5
+    FAC & AST & SHM & AGO & DEV --> S1 --> S2
+    S2 --> P1 & P2 & P3 & P4 & P5
     P1 & P2 & P3 & P4 & P5 --> USG
 ```
 
-## 5. Modules from agent-orchestrator
+## 5. Modules: what agent-orchestrator inspired, what exists
 
 {/* diagram: 05-agent-orchestrator-modules */}
 ```mermaid
 flowchart LR
-    subgraph AO["agent-orchestrator (unchanged, becomes a client)"]
-        A1["providers/openai.py<br/>base_url = llm_brain, api_key = 'ago' profile"]
+    subgraph AO["agent-orchestrator (becomes a client)"]
+        A1["providers/openai.py<br/>base_url = llm_brain, api_key = brain_ago_…"]
         A2["dashboard, graph, agent runtime…<br/>unchanged"]
     end
 
-    subgraph REUSE["From agent-orchestrator: copy and adapt into llm_brain"]
-        R1["core/usage.py<br/>UsageRecord · BudgetConfig.max_per_day · UsageTracker"]
-        R2["core/cache.py<br/>BaseCache · CachePolicy · CacheStats → + SQLite backend"]
-        R3["providers/openrouter.py<br/>cache_control injection"]
-        R4["core/evaluator.py + evals_routes.py<br/>EvalCase · EvalSuite · compare"]
+    subgraph REUSE["Ideas ported (not code)"]
+        R1["core/usage.py<br/>per-day budget check"]
+        R2["core/cache.py<br/>cache policy · hit rate"]
+        R4["core/evaluator.py<br/>eval suite · compare"]
     end
 
-    subgraph NEW["llm_brain — its own repo"]
-        N1["api/openai_compat.py<br/>POST /v1/chat/completions · GET /v1/models"]
-        N2["api/anthropic_compat.py<br/>POST /v1/messages · count_tokens"]
-        N3["core/profiles.py<br/>api_key → profile: tier, daily/monthly budget, cache policy, versioned system prompt"]
-        N4["core/tiers.py<br/>brain/* aliases → (provider, model); claude-* → tier"]
-        N5["core/budget.py<br/>daily + monthly, 70/85/100 degradation, pre-call estimate"]
-        N6["core/cache_l2.py<br/>exact SQLite (semantic later)"]
-        N7["core/escalation.py<br/>failure → higher tier (Phase 2)"]
-        N8["bench/<br/>real-bug suite + cron + promotion"]
-        DB[("SQLite<br/>usage · budget · cache · eval")]
+    subgraph NEW["llm_brain — crates/brain/src"]
+        N1["proxy/mod.rs<br/>both dialects · auth chain · forward"]
+        N2["auth.rs · keys.rs<br/>client keys (hashed) · OpenRouter keys"]
+        N3["budget.rs<br/>daily + monthly, 70/85/100 rings"]
+        N4["proxy/route.rs<br/>brain/auto per session"]
+        N5["proxy/sanitize.rs · tap.rs · usage_parse.rs"]
+        N6["L2 response cache<br/>(designed, not built)"]
+        N8["bench/<br/>real-bug suite (nightly promotion: Phase 2)"]
+        DB[("SQLite<br/>requests · keys · usage · events · bench")]
     end
 
     A1 --> N1
-    N1 & N2 --> N3 --> N5 --> N4 --> N6
-    R1 -.-> N5
+    N1 --> N2 --> N3 --> N4 --> N5
+    R1 -.-> N3
     R2 -.-> N6
-    R3 -.-> N4
     R4 -.-> N8
-    N5 & N6 & N8 --> DB
+    N5 & N8 --> DB
 ```
 
 ## 6. Budget rings
@@ -207,54 +184,47 @@ flowchart LR
 {/* diagram: 06-budget-rings */}
 ```mermaid
 flowchart TB
-    subgraph R3["Ring 3 — Client (informational)"]
-        C1["Claude Code: statusline / Stop hook shows today's spend"]
+    subgraph R3["Ring 3 — Client and board (informational)"]
+        C1["board: spend per day/month, projection vs soft caps"]
         C2["aider: cap on repo-map and chat-history tokens"]
     end
     subgraph R2["Ring 2 — llm_brain (soft, with degradation)"]
-        B1["daily AND monthly budget per profile (dev: 3 €/day, 30 €/month)"]
-        B2["pre-call estimate: input × price + max_tokens × price"]
-        B3["70% → fast tier only · 85% → reduced max_tokens · 100% → 429 with a clear message"]
-        B4["usage per profile → dashboard"]
+        B1["daily AND monthly budget per profile (dev: 5 $/day, 60 $/month soft)"]
+        B2["spend = sum of recorded request costs (OpenRouter's cost, else tier prices)"]
+        B3["70% → fast tier only · 85% → reduced max_tokens · 100% → 429, retry-after ≥ 3600"]
     end
     subgraph R1["Ring 1 — OpenRouter (hard, cannot be bypassed)"]
         O1["prepaid credits: negative balance = 402"]
-        O2["one key per profile with limit + limit_reset: daily (dev: 3 €)"]
-        O5["fixed monthly top-up (≈ 40 €) = hard monthly ceiling"]
-        O3["held-cost: requests that don't fit the balance are rejected up front"]
-        O4["GET /api/v1/key: usage_daily, limit_remaining"]
+        O2["one key per profile with limit + limit_reset: daily (dev: 5 $)"]
+        O5["fixed monthly top-up = hard monthly ceiling"]
+        O4["GET /api/v1/key: usage_daily, limit_remaining (usage snapshot)"]
     end
     R3 --> R2 --> R1
-    O4 -. "reconciliation" .-> B4
+    O4 -. "reconciliation on the board" .-> C1
 ```
 
-## 7. Cache decision flow
+## 7. Cache decision flow (L2 steps designed, not built)
 
 {/* diagram: 07-cache-decision */}
 ```mermaid
 flowchart TD
     A["Incoming request<br/>(profile, alias, system?, messages, tools, temperature)"] --> B{"Does the client send a system prompt?"}
-    B -- "no (app via SDK)" --> B1["The layer prepends the profile's<br/>versioned system prompt"]
-    B -- "yes (Claude Code, aider)" --> B2["Prefix left untouched,<br/>never reordered"]
-    B1 --> C["Normalize → key =<br/>sha256(profile, alias, system_v, tools, messages, temperature)"]
-    B2 --> C
-    C --> D{"Profile L2 policy"}
-    D -- "OFF (dev)" --> H
-    D -- "exact" --> E{"hit in SQLite<br/>and not expired?"}
+    B -- "no (app via SDK)" --> B1["NOT BUILT: the layer prepends the profile's<br/>versioned system prompt"]
+    B -- "yes (Claude Code, aider)" --> B2["Prefix left untouched,<br/>never reordered (built)"]
+    B1 --> D
+    B2 --> D
+    D{"Profile l2_cache policy<br/>(NOT BUILT: read, no effect today)"}
+    D -- "off (dev)" --> H
+    D -- "exact" --> E{"sha256(profile, alias, system_v, tools, messages, temperature)<br/>hit in SQLite and not expired?"}
     D -- "semantic" --> F{"neighbour with cos ≥ 0.95<br/>same namespace?"}
     E -- "yes" --> R1["Response from cache<br/>usage: cost=0, source=l2"]
     F -- "yes" --> R1
     E -- "no" --> H
     F -- "no" --> H
-    H["L1 — prepare the call"] --> H1{"Provider with explicit cache?<br/>(Anthropic, Gemini, Qwen)"}
-    H1 -- "yes" --> H2["Insert cache_control after<br/>system+tools and on the second-to-last turn<br/>(max 4 breakpoints)"]
-    H1 -- "no (OpenAI, DeepSeek, Grok, Groq…)" --> H3["Nothing to do:<br/>a stable prefix is enough"]
-    H2 --> I["session_id = profile+conversation<br/>→ OpenRouter sticky routing"]
-    H3 --> I
-    I --> J["Call"]
-    J --> K["Read usage.prompt_tokens_details:<br/>cached_tokens, cache_write_tokens, cache_discount"]
+    H["L1 — client's cache_control and prefix passed through (built)"] --> J["Call OpenRouter"]
+    J --> K["Read usage: cached / cache-write tokens,<br/>serving backend → requests row (built)"]
     K --> L{"Cacheable in L2?<br/>no tool_use, no error,<br/>no truncated stream, temp ≤ 0.3"}
-    L -- "yes" --> M["Write to L2 with the profile's TTL"]
+    L -- "yes" --> M["NOT BUILT: write to L2 with the profile's TTL"]
     L -- "no" --> N["Respond"]
     M --> N
 ```
@@ -265,29 +235,29 @@ flowchart TD
 ```mermaid
 flowchart LR
     subgraph CLIENTS["Clients — each holds ONLY its own llm_brain key"]
-        CC["Claude Code<br/>ANTHROPIC_API_KEY=brain_dev_…"]
+        CC["Claude Code<br/>ANTHROPIC_AUTH_TOKEN=brain_dev_…"]
         AID["aider<br/>OPENAI_API_KEY=brain_dev_…"]
-        AST["assistant<br/>env BRAIN_API_KEY=brain_assistant_…"]
-        CAR["find-a-car<br/>env BRAIN_API_KEY=brain_car_…"]
-        AGO["agent-orchestrator<br/>brain_ago_…"]
+        AST["assistant<br/>brain_assistant_…"]
+        CAR["find-a-car<br/>BRAIN_CAR_KEY=brain_car_…"]
+        BEN["brain bench --via-proxy<br/>BRAIN_BENCH_KEY=brain_benchmark_…"]
     end
 
-    subgraph BRAIN["llm_brain"]
-        AUTH["Auth<br/>Authorization: Bearer / x-api-key<br/>sha256(key) → keys table → profile"]
-        KEYS[("keys (SQLite)<br/>hash · profile · created · last used · revoked")]
-        SEC["Runtime secret store<br/>.env 0600 or sops+age<br/>OPENROUTER_KEY_DEV, _AGO, _ASSISTANT, _CAR, _BENCH"]
+    subgraph BRAIN["llm_brain (VPS)"]
+        AUTH["Auth<br/>Authorization: Bearer / x-api-key<br/>sha256(key) → api_keys → profile"]
+        KEYS[("api_keys (SQLite)<br/>hash · profile · name · expiry · IPs · revoked")]
+        SEC[".env 0600 (brain user)<br/>OPENROUTER_KEY_DEV, _AGO, _BENCHMARK, _ASSISTANT, _CAR"]
         PRX["Proxy → OpenRouter<br/>with the profile's key"]
     end
 
     subgraph ADMIN["Admin only, never in the runtime"]
-        MGMT["OPENROUTER_MANAGEMENT_KEY<br/>used once by 'brain keys provision'"]
-        PROV["OpenRouter Provisioning API<br/>creates a per-profile key with a daily limit"]
+        MGMT["OPENROUTER_MANAGEMENT_KEY<br/>brain upstream provision | sync | list"]
+        PROV["OpenRouter Provisioning API<br/>per-profile key with a daily limit"]
     end
 
-    CC & AID & AST & CAR & AGO --> AUTH --> KEYS
+    CC & AID & AST & CAR & BEN --> AUTH --> KEYS
     AUTH --> PRX
     SEC --> PRX
-    MGMT --> PROV -. "created key → pasted into SEC" .-> SEC
+    MGMT --> PROV -. "created key → copied into SEC" .-> SEC
 ```
 
 ## 9. Topology
@@ -295,30 +265,25 @@ flowchart LR
 {/* diagram: 09-topology */}
 ```mermaid
 flowchart LR
-    subgraph LOCAL["Home (local network)"]
+    subgraph LOCAL["Home (laptop)"]
         CC["Claude Code · aider<br/>brain_dev_…"]
-        AST["assistant (stays local)<br/>brain_assistant_…"]
-        AGO["agent-orchestrator<br/>brain_ago_…"]
+        AST["assistant (local)<br/>brain_assistant_…"]
+        FAC["find-a-car (Docker)<br/>brain_car_…"]
     end
 
-    subgraph REMOTE["VPS / AWS"]
-        subgraph BRAIN["llm_brain (decided: on the VPS)"]
-            CADDY["Caddy: automatic HTTPS<br/>only /v1/*, per-key rate limit"]
-            API["FastAPI"]
-            DB[("SQLite<br/>usage · budget · keys · cache")]
-            ENV["secrets: sops+age → .env 0600<br/>or systemd LoadCredential"]
-        end
-        CAR["find-a-car (backend)<br/>brain_car_… from Secrets Manager / SSM or .env"]
-        SHM["second-hand market (backend)<br/>brain_market_…"]
-        LS["Litestream → S3/B2<br/>continuous SQLite replication"]
+    subgraph VPS["VPS (Contabo, x86_64)"]
+        CADDY["Caddy: Let's Encrypt on an sslip.io hostname<br/>/v1/* → proxy · board behind basic auth"]
+        API["brain serve (systemd, brain user)"]
+        DB[("SQLite<br/>requests · keys · usage · events")]
+        ENV[".env 0600<br/>OpenRouter keys per profile"]
     end
 
-    USERS["End users<br/>(browser / mobile)"] -- "the APP's auth<br/>(never llm_brain keys in the frontend)" --> CAR & SHM
-    CAR & SHM -- "HTTPS + Bearer brain_*<br/>+ user: <opaque id>" --> CADDY
-    CC & AST & AGO -- "HTTPS (or Tailscale)<br/>+ Bearer brain_*" --> CADDY
+    LS["Litestream → S3/B2<br/>(configured, not installed yet)"]
+    USERS["End users (later, public apps)"] -- "the APP's auth<br/>(never llm_brain keys in a frontend)" --> FAC
+    CC & AST & FAC -- "HTTPS + Bearer brain_*<br/>+ user: opaque id" --> CADDY
     CADDY --> API --> DB
     ENV --> API
-    DB --> LS
+    DB -.-> LS
     API -- "profile's OpenRouter key" --> OR["OpenRouter"]
 ```
 
@@ -329,7 +294,7 @@ flowchart LR
 sequenceDiagram
     autonumber
     actor ADM as Admin (you)
-    participant CLI as brain CLI (on the server, via SSH/Tailscale)
+    participant CLI as brain CLI (on the server, via SSH)
     participant DB as SQLite api_keys
     participant APP as find-a-car backend
     participant MW as llm_brain auth middleware
@@ -342,12 +307,12 @@ sequenceDiagram
     CLI->>CLI: random 32 bytes → brain_car_<base64url>
     CLI->>DB: INSERT hash=sha256(key), profile=car, name, expires_at
     CLI-->>ADM: prints the key ONCE
-    ADM->>APP: puts the key in SSM / .env (never in the repo, never in the frontend)
+    ADM->>APP: puts the key in the app's .env (never in the repo, never in the frontend)
     end
 
     rect rgb(240,255,240)
     note over APP,OR: Request — every call
-    APP->>MW: POST /v1/chat/completions<br/>Authorization: Bearer brain_car_…<br/>user: "u_8f3a" · X-Brain-Run (opt.)
+    APP->>MW: POST /v1/chat/completions<br/>Authorization: Bearer brain_car_…<br/>user: "u_8f3a"
     MW->>MW: valid prefix? → sha256 → lookup (60 s cache)
     MW->>DB: SELECT profile, revoked_at, expires_at WHERE hash=?
     alt unknown / revoked / expired
@@ -359,7 +324,7 @@ sequenceDiagram
         else ok
             MW->>OR: same request, car profile's OpenRouter key
             OR-->>MW: response + usage (cached_tokens…)
-            MW->>DB: usage(profile, key, user, run, cost) · last_used_at
+            MW->>DB: requests row (profile, key, user, tokens, cost, backend) · last_used_at
             MW-->>APP: response in the client's dialect
         end
     end
@@ -369,32 +334,28 @@ sequenceDiagram
     note over ADM,APP: Rotation — zero downtime
     ADM->>CLI: brain keys create --profile car --name prod-2
     ADM->>APP: deploy with the new key
-    ADM->>CLI: brain keys revoke prod
+    ADM->>CLI: brain keys revoke --profile car --name prod
     CLI->>DB: UPDATE revoked_at=now
     end
 ```
 
-## 11. Hosting options
+## 11. Hosting: what runs, what is equivalent
 
 {/* diagram: 11-hosting-options */}
 ```mermaid
 flowchart LR
-    subgraph A["Discarded alternative — everything on AWS"]
-        A1["EC2 t4g.small (2 vCPU ARM, 2 GB)<br/>Caddy + FastAPI + SQLite + Litestream<br/>≈ $14/m + EBS 20 GB ≈ $2 + IPv4 ≈ $3.7"]
-        A2["find-a-car · market<br/>same VPC / same region"]
-        A3["S3 (Litestream backup) ≈ $0.1<br/>SSM Parameter Store: free"]
-        A2 -- "private network, security group<br/>no public exposure" --> A1
-        A1 --> A3
-        H1["Home: CLI + assistant"] -- "Tailscale" --> A1
+    subgraph RUN["RUNNING — llm_brain on a VPS, apps anywhere"]
+        B1["Contabo VPS (x86_64, 4 vCPU, 8 GB)<br/>Caddy + brain serve + SQLite"]
+        B2["apps<br/>laptop, AWS, a VPS — no constraint"]
+        B3["S3-compatible bucket<br/>Litestream backup (pending)"]
+        B2 -- "public HTTPS + per-app key<br/>+ rate limit (+5–10 ms EU→EU)" --> B1 -.-> B3
     end
-    subgraph B["CHOSEN — llm_brain on a VPS, apps anywhere"]
-        B1["Hetzner CAX11/CX23 (2 vCPU, 4 GB)<br/>≈ 4–5 €/m all-in"]
-        B2["find-a-car · market<br/>on AWS, a VPS or wherever needed"]
-        B3["Backblaze B2 / Hetzner Object Storage<br/>backup ≈ 0"]
-        B2 -- "public HTTPS + per-app key<br/>+ rate limit (+5–10 ms EU→EU)" --> B1 --> B3
-        H2["Home: CLI + assistant"] -- "Tailscale or HTTPS" --> B1
+    subgraph ALT["Equivalent alternatives"]
+        A1["Hetzner CAX11 ≈ €4–5"]
+        A2["AWS Lightsail $5<br/>if the apps land on AWS"]
+        A3["EC2 + managed DB<br/>only at the HA step"]
     end
-    X["Mixed is acceptable: the public endpoint is protected by the auth design;<br/>the extra latency (+5–10 ms) is nothing next to the model"]
+    B1 -. "same binary, scp + systemd" .-> A1 & A2 & A3
 ```
 
 ## 12. Auto routing (brain/auto)
@@ -415,7 +376,7 @@ sequenceDiagram
     PX->>JV: state = first user message<br/>question "tier" (choice) · criteria = the ladder's `when`
     JV-->>PX: choice=medium · confidence 0.95 (~0.5 s, ~0.00002 $)
     PX->>SC: put(dev:h:s1 → medium)
-    PX->>OR: same request · model = glm-5.3-flash (+ fallback chain)
+    PX->>OR: same request · model = glm-5.3-flash
     OR-->>CC: stream
     Note over CC,PX: every later turn of the loop (tool results, retries…)
     CC->>PX: POST /v1/messages · model=brain/auto · same session id

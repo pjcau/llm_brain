@@ -1,17 +1,13 @@
 flowchart LR
-    subgraph A["Discarded alternative — everything on AWS"]
-        A1["EC2 t4g.small (2 vCPU ARM, 2 GB)<br/>Caddy + FastAPI + SQLite + Litestream<br/>≈ $14/m + EBS 20 GB ≈ $2 + IPv4 ≈ $3.7"]
-        A2["find-a-car · market<br/>same VPC / same region"]
-        A3["S3 (Litestream backup) ≈ $0.1<br/>SSM Parameter Store: free"]
-        A2 -- "private network, security group<br/>no public exposure" --> A1
-        A1 --> A3
-        H1["Home: CLI + assistant"] -- "Tailscale" --> A1
+    subgraph RUN["RUNNING — llm_brain on a VPS, apps anywhere"]
+        B1["Contabo VPS (x86_64, 4 vCPU, 8 GB)<br/>Caddy + brain serve + SQLite"]
+        B2["apps<br/>laptop, AWS, a VPS — no constraint"]
+        B3["S3-compatible bucket<br/>Litestream backup (pending)"]
+        B2 -- "public HTTPS + per-app key<br/>+ rate limit (+5–10 ms EU→EU)" --> B1 -.-> B3
     end
-    subgraph B["CHOSEN — llm_brain on a VPS, apps anywhere"]
-        B1["Hetzner CAX11/CX23 (2 vCPU, 4 GB)<br/>≈ 4–5 €/m all-in"]
-        B2["find-a-car · market<br/>on AWS, a VPS or wherever needed"]
-        B3["Backblaze B2 / Hetzner Object Storage<br/>backup ≈ 0"]
-        B2 -- "public HTTPS + per-app key<br/>+ rate limit (+5–10 ms EU→EU)" --> B1 --> B3
-        H2["Home: CLI + assistant"] -- "Tailscale or HTTPS" --> B1
+    subgraph ALT["Equivalent alternatives"]
+        A1["Hetzner CAX11 ≈ €4–5"]
+        A2["AWS Lightsail $5<br/>if the apps land on AWS"]
+        A3["EC2 + managed DB<br/>only at the HA step"]
     end
-    X["Mixed is acceptable: the public endpoint is protected by the auth design;<br/>the extra latency (+5–10 ms) is nothing next to the model"]
+    B1 -. "same binary, scp + systemd" .-> A1 & A2 & A3

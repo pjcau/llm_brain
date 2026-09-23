@@ -1,32 +1,26 @@
 flowchart LR
-    subgraph APPS["Existing apps (GitHub)"]
-        SHM["Second-hand market (later)<br/>listing classification, descriptions, moderation"]
-        FAC["Find-a-car second hand (first)<br/>valuation, comparison, extraction from listings"]
-        AST["Assistant (first)<br/>conversational chat, RAG"]
-        AGO["agent-orchestrator<br/>openai-compat provider"]
-        DEV["Dev tooling<br/>Claude Code · aider"]
+    subgraph APPS["Clients"]
+        FAC["find-a-car (integrated)<br/>skills run claude via the proxy"]
+        AST["assistant (key issued)<br/>chat, RAG"]
+        SHM["second-hand market (later)"]
+        AGO["agent-orchestrator (not yet wired)"]
+        DEV["Dev tooling<br/>Claude Code · aider · OpenCode"]
     end
 
     subgraph SDK["How they integrate"]
-        S1["Official OpenAI SDK<br/>base_url = llm_brain<br/>api_key = per-app key"]
-        S2["X-Brain-Profile header<br/>or api_key → profile"]
+        S1["Official SDK<br/>base_url = llm_brain<br/>api_key = brain_&lt;profile&gt;_…"]
+        S2["user = opaque end-user id<br/>x-brain-session = conversation (brain/auto)"]
     end
 
-    subgraph BRAIN["llm_brain"]
-        PRF["Per-client profiles"]
-        P1["profile: market<br/>fast tier · L2 semantic ON · budget 5€/m"]
-        P2["profile: car<br/>fast + reasoning for valuations · budget 10€/m"]
-        P3["profile: assistant<br/>fast tier · L2 exact ON · streaming"]
-        P4["profile: dev<br/>fast tier, reasoning escalation · L2 OFF · 3€/day, 30€/m"]
-        P5["profile: ago<br/>like dev, own budget"]
-        USG["Usage per profile → llm_brain dashboard"]
+    subgraph BRAIN["llm_brain profiles (config/profiles.yaml)"]
+        P1["car<br/>fast · 0.50 $/day · 15 $/m soft"]
+        P2["assistant<br/>own brain/auto ladder · 0.50 $/day · 15 $/m soft"]
+        P3["dev<br/>brain/auto via px-claude · 5 $/day · 60 $/m soft"]
+        P4["ago<br/>1 $/day · 5 $/m soft"]
+        P5["benchmark<br/>0.50 $/day · 5 $/m soft"]
+        USG["requests table → board"]
     end
 
-    SHM --> S1
-    FAC --> S1
-    AST --> S1
-    DEV --> S1
-    AGO --> S1
-    S1 --> S2 --> PRF
-    PRF --> P1 & P2 & P3 & P4 & P5
+    FAC & AST & SHM & AGO & DEV --> S1 --> S2
+    S2 --> P1 & P2 & P3 & P4 & P5
     P1 & P2 & P3 & P4 & P5 --> USG

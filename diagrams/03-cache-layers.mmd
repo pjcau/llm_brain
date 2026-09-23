@@ -4,13 +4,13 @@ flowchart TB
         L0b["aider: repo map, chat history"]
     end
 
-    subgraph L2["L2 — Response cache (gateway, llm_brain)"]
+    subgraph L2["L2 — Response cache (llm_brain, designed, not built)"]
         L2a["Exact match: hash(normalized messages + model + tools) → response, TTL"]
         L2b["Semantic (optional, apps only): query embedding → similar response"]
         L2n["⚠ OFF for coding agents: files change, response goes stale"]
     end
 
-    subgraph L1["L1 — Provider prompt cache (translated by llm_brain)"]
+    subgraph L1["L1 — Provider prompt cache (cache hints passed through untouched)"]
         L1a["Anthropic: explicit cache_control on blocks"]
         L1b["OpenAI: automatic prefix cache"]
         L1c["Gemini: explicit context caching, with TTL and storage cost"]
@@ -27,5 +27,5 @@ flowchart TB
     end
 
     REQ["Request"] --> L0 --> L2
-    L2 -- miss --> L1 --> PROV["Provider (pinned per session: next step)"]
+    L2 -- miss --> L1 --> PROV["Provider (pinning per model: next step)"]
     L3 -. "the app decides before calling llm_brain" .-> REQ

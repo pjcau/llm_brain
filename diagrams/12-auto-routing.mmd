@@ -12,7 +12,7 @@ sequenceDiagram
     PX->>JV: state = first user message<br/>question "tier" (choice) · criteria = the ladder's `when`
     JV-->>PX: choice=medium · confidence 0.95 (~0.5 s, ~0.00002 $)
     PX->>SC: put(dev:h:s1 → medium)
-    PX->>OR: same request · model = glm-5.3-flash (+ fallback chain)
+    PX->>OR: same request · model = glm-5.3-flash
     OR-->>CC: stream
     Note over CC,PX: every later turn of the loop (tool results, retries…)
     CC->>PX: POST /v1/messages · model=brain/auto · same session id

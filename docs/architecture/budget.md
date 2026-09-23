@@ -5,11 +5,11 @@ title: Budget and cost control
 # Budget and cost control
 
 Primary requirement: **never go over budget**, ahead of features. Chats
-are not a problem (they're cheap); **agents and coding use** are, because
-their volume is unpredictable. We need a daily limit and gradual
-degradation, not just a wall.
+are cheap; **agents and coding** are not, because their volume is
+unpredictable. So: a daily limit, a monthly one, and gradual degradation
+before the wall.
 
-## Does OpenRouter keep cost under control? Yes, if configured this way
+## What OpenRouter enforces on its own
 
 Verified on the official documentation (2026-09-19):
 
@@ -21,108 +21,100 @@ Verified on the official documentation (2026-09-19):
 | Usage readout | Spend per key per day/week/month | `GET /api/v1/key` → `usage_daily`, `usage_weekly`, `limit_remaining` |
 | Provisioning API | Key creation from code with `limit` and `limit_reset` | `POST /api/v1/keys` |
 
-Conclusion: **one OpenRouter key per profile** (`dev`, `market`, `car`,
-`assistant`, `benchmark`), each with a daily `limit`. That is the ceiling
-no bug in the layer can exceed.
+Hence **one OpenRouter key per profile** (`brain upstream provision`),
+each with a daily `limit`: the ceiling no bug in the layer can exceed.
 
 ## The three rings
 
 {/* diagram: 06-budget-rings */}
 ```mermaid
 flowchart TB
-    subgraph R3["Ring 3 — Client (informational)"]
-        C1["Claude Code: statusline / Stop hook shows today's spend"]
+    subgraph R3["Ring 3 — Client and board (informational)"]
+        C1["board: spend per day/month, projection vs soft caps"]
         C2["aider: cap on repo-map and chat-history tokens"]
     end
     subgraph R2["Ring 2 — llm_brain (soft, with degradation)"]
-        B1["daily AND monthly budget per profile (dev: 3 €/day, 30 €/month)"]
-        B2["pre-call estimate: input × price + max_tokens × price"]
-        B3["70% → fast tier only · 85% → reduced max_tokens · 100% → 429 with a clear message"]
-        B4["usage per profile → dashboard"]
+        B1["daily AND monthly budget per profile (dev: 5 $/day, 60 $/month soft)"]
+        B2["spend = sum of recorded request costs (OpenRouter's cost, else tier prices)"]
+        B3["70% → fast tier only · 85% → reduced max_tokens · 100% → 429, retry-after ≥ 3600"]
     end
     subgraph R1["Ring 1 — OpenRouter (hard, cannot be bypassed)"]
         O1["prepaid credits: negative balance = 402"]
-        O2["one key per profile with limit + limit_reset: daily (dev: 3 €)"]
-        O5["fixed monthly top-up (≈ 40 €) = hard monthly ceiling"]
-        O3["held-cost: requests that don't fit the balance are rejected up front"]
-        O4["GET /api/v1/key: usage_daily, limit_remaining"]
+        O2["one key per profile with limit + limit_reset: daily (dev: 5 $)"]
+        O5["fixed monthly top-up = hard monthly ceiling"]
+        O4["GET /api/v1/key: usage_daily, limit_remaining (usage snapshot)"]
     end
     R3 --> R2 --> R1
-    O4 -. "reconciliation" .-> B4
+    O4 -. "reconciliation on the board" .-> C1
 ```
 
 ### Ring 1 — OpenRouter (hard)
-The wall. One key per profile with `limit_reset: daily`. The layer reads
-`GET /api/v1/key` to reconcile its own counters with the real ones.
+The wall: one key per profile with `limit_reset: daily`, plus the fixed
+monthly credit top-up (once gone, `402` for everyone — needs no code).
+`brain usage snapshot` (and the refresh loop of `brain serve`) stores
+`GET /api/v1/key` per profile, so the board can reconcile the proxy's
+counters with OpenRouter's.
 
 ### Ring 2 — llm_brain (soft, with degradation)
-agent-orchestrator's `core/usage.py` already has `BudgetConfig.max_per_day`
-and `UsageTracker.check_budget`. To be extended per profile and with a
-**degradation policy** before the block:
+`budget.rs`, checked on every proxied request (not on `count_tokens`).
+Spend is the sum of the recorded request costs (OpenRouter's `usage.cost`,
+else the tier prices) since midnight UTC and since the 1st of the month;
+the higher of the two percentages decides:
 
-| Day's spend | Action |
-|-------------|--------|
-| < 70% | normal |
-| 70–85% | `reasoning` disabled, everything on `fast` |
-| 85–100% | reduced `max_tokens`, L2 cache forced ON where possible |
-| 100% | `429` with an error in the client's dialect; for Claude Code `retry-after: 3600` + `x-should-retry: false` so it **doesn't retry** and shows "budget exhausted" ([why](./client-compatibility.md#responses)) |
+| Spend (max of day %, month %) | Action | Board note |
+|-------------------------------|--------|------------|
+| < 70% | normal | — |
+| 70–85% | every request goes to the `fast` tier (including `agent` and `brain/auto`) | `fast-only` |
+| 85–100% | `fast`, and `max_tokens` capped at 2048 | `max-tokens` |
+| ≥ 100% | `429` in the client's dialect, `retry-after` = time to the reset (at least 3600 s), `x-should-retry: false`, so Claude Code **doesn't retry** and shows "budget exhausted" ([why](./client-compatibility.md#responses)) | `blocked` |
 
-Plus a **pre-call estimate** (input tokens × price + `max_tokens` × price,
-prices from `/api/v1/models`) to reject a single out-of-scale request,
-like OpenRouter's held-cost.
+Independently of the budget, `max_tokens` is always capped to the
+provider's max and the tier's `max_output_tokens` (the 89k-token runaway
+of 2026-09-20), see [API layer](./api-layer.md).
 
-### Ring 3 — Client (informational)
-Doesn't block, informs: Claude Code statusline / `Stop` hook showing the
-day's spend (from `llm_brain /usage/today`); in aider a cap on repo-map and
-chat-history tokens.
+:::note Not built
+A pre-call cost estimate (input × price + `max_tokens` × price) to reject
+a single out-of-scale request; OpenRouter's held-cost covers the extreme
+case.
+:::
+
+### Ring 3 — Client and board (informational)
+Doesn't block, informs: the board shows spend per profile per day and
+month with the projection against the soft caps; in aider, caps on
+repo-map and chat-history tokens. A Claude Code statusline with the day's
+spend is an idea, not built.
 
 ## Budget per profile
 
-Decided on 2026-09-19, `dev` raised on 2026-09-20. The delicate point: the
-daily figure is a **peak cap** (heavy days), not a pace: a **monthly** limit
-is needed too, and they are two different mechanisms.
+In USD, from `config/profiles.yaml`. The daily figure is a **peak cap**
+(heavy days), not a pace: the **monthly** soft limit is what keeps the
+pace, and they are two different mechanisms.
 
-What a real day costs (measured on 2026-09-20, the first full day of Claude
-Code through the proxy): **≈ 2.2 $** for 286 requests, 124 of them on
-`deepseek-v4-pro` with ~60k-token contexts (Claude Code resends the whole
-conversation; cache reads make it cheap but not free). At the 3 $ cap the
-70% ring kicked in at 18:38 UTC and forced 48 requests to `fast`, which is
-exactly the "it works worse now" the user sees. The cap was raised to 5 $/day
-and 60 $/month soft: a full month of such days is ≈ 60 $, still a third of
-the subscription it replaces. Changing a limit is two steps: edit
-`profiles.yaml` (the layer's rings follow immediately after a restart) and
-`brain upstream sync --only dev` (the OpenRouter key's hard wall, PATCHed in
-place — the secret does not change).
+What a real day costs (2026-09-20, the first full day of Claude Code
+through the proxy): **≈ 2.2 $** for 286 requests, 124 of them on
+`deepseek-v4-pro` with ~60k-token contexts. At the then 3 $ cap the 70%
+ring kicked in at 18:38 UTC and forced 48 requests to `fast` — exactly
+the "it works worse now" the user sees — so `dev` was raised to 5 $/day
+and 60 $/month soft.
 
-| Profile | €/day (peak, hard on the OpenRouter key) | €/month (soft in the layer, with degradation) | Notes |
+| Profile | $/day (hard on the OpenRouter key; ring 2 too) | $/month (soft, ring 2) | Notes |
 |---------|------|------|------|
-| `dev` (Claude Code + aider) | **5.00** (was 3.00 until 2026-09-20) | **60** (was 30) | degradation at 70% of either window: `agent`/`reasoning` requests go to `fast` |
-| `ago` (agent-orchestrator) | 1.00 | 5 | same tier as `dev`, separate budget |
-| `benchmark` | 0.50 | 5 | separate key, never at the expense of dev |
-| `assistant` + `car` | **0.50** each (was 0.20 until 2026-09-22) | **15** each (was 3) | almost only `fast`; the monthly soft is the real ceiling, the daily one is the safety net |
+| `dev` (Claude Code + aider) | **5.00** (3.00 until 2026-09-20) | **60** (30 until 2026-09-20) | sustainable pace ≈ 2 $/day: at 5 $/day every day, the monthly soft cap is hit by day 12 |
+| `ago` (agent-orchestrator) | 1.00 | 5 | separate budget |
+| `benchmark` | 0.50 | 5 | separate key, never at the expense of `dev` ([Benchmark](./benchmark.md)) |
+| `assistant` | **0.50** (0.20 until 2026-09-22) | **15** (3 until 2026-09-22) | own `brain/auto` ladder |
+| `car` (find-a-car) | **0.50** (0.20 until 2026-09-22) | **15** (3 until 2026-09-22) | almost only `fast` |
 | `market` (later) | — | — | when it joins |
-| **Hard monthly ceiling (tokens)** | | **≈ 40** | = fixed monthly top-up of OpenRouter credits |
-| Hosting (outside OpenRouter) | | 5–15 | VPS or AWS, see [Hosting](../analysis/hosting-costs.md) |
-| **Project total** | | **≈ 45–55** | |
 
-How the two limits fit together:
+Hard monthly ceiling: the OpenRouter credit top-up. Hosting (the VPS) is
+outside OpenRouter, see [Hosting](../analysis/hosting-costs.md). The
+original project goal stays **< 40 €/month** in total; `dev`'s 60 $ soft
+cap is the ceiling, not the expected spend.
 
-- **Daily, hard**: `limit` on the profile's OpenRouter key with
-  `limit_reset: daily`. Stops spikes (an agent in a loop can't burn more
-  than 3 € in a day, whatever happens).
-- **Monthly, soft with degradation**: counter in the layer (SQLite) per
-  profile, thresholds 70/85/100%. Slows the pace before hitting the wall.
-- **Monthly, hard**: the OpenRouter credit top-up is fixed (≈ 40 €): once
-  gone, `402` for everyone. The last net, and it needs no code.
+Changing a limit is two steps: edit `profiles.yaml` (ring 2 follows after
+a restart of `brain serve`) and `brain upstream sync --only <profile>`
+(ring 1: the OpenRouter key's limit is PATCHed in place, the secret does
+not change).
 
-The `dev` profile is also the only one where the monthly matters more
-than the daily: with a 3 €/day cap, the sustainable pace is ~1 €/day and
-the layer must show it in the statusline ("today 0.80 € · month 14/30 €").
-
-## What changes in the plan
-
-- **Phase 0 no longer needs LiteLLM for the budget**: OpenRouter's per-key
-  limits are enough and need no Postgres (LiteLLM enforces budgets only
-  with a DB: "none of them cap anything on a DB-less deployment"). See
-  [Stack](../analysis/stack.md).
-- The nightly benchmark has its own key and budget ([Benchmark](./benchmark.md)).
+No LiteLLM for any of this: OpenRouter's per-key limits plus ~150 lines of
+`budget.rs` over the SQLite `requests` table (see [Stack](../analysis/stack.md)).

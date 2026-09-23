@@ -4,37 +4,45 @@ title: Which CLI
 
 # Which CLI
 
-:::note Decided
-**Both** go forward in Phase 0. For every task the benchmark measures who
-burns fewer tokens/€ and who reaches the result first (turns, time). The
-choice, or a per-task-type coexistence, comes out of the data.
+:::note Decided 2026-09-20
+- **Claude Code through the proxy is the daily agent** (`px-claude`, model
+  `brain/auto`; the `agent` tier is deepseek-v4-pro).
+- **aider is the cheap editor** for targeted changes (architect/editor),
+  not the agent.
+- **OpenCode is benchmarked** as the open-source third agent.
+
+This replaces "both go forward on equal terms" (2026-09-19). Numbers:
+[agents compared through the proxy](../phase-1.md#agents-compared-through-the-proxy).
 :::
 
-## aider — the safe choice
+## Claude Code — the daily agent
 
-- Native OpenAI-compatible endpoint, no hacks.
-- **architect/editor** mode is exactly the 90/10: `--editor-model` = `fast`
-  tier, `--model` (architect) = `reasoning` tier, manual switch with
-  `/model`.
-- Frugal with tokens (repo map, doesn't read everything).
-- Manual routing = a perfect v1.
+- `ANTHROPIC_BASE_URL` → llm_brain, client key of the `dev` profile
+  (`brain setup claude-code --proxy`).
+- Keeps habits, skills, hooks, which [always work](../architecture/claude-code-aider.md).
+- Token-hungry (large system prompt, many turns); the proxy's sanitizer
+  removes the Claude-only fields other models reject
+  ([client compatibility](../architecture/client-compatibility.md)).
+- Needs a model with a reliable tool loop: that is why its baseline is the
+  `agent` tier, and `brain/auto` only moves light sessions down the ladder.
 
-## Claude Code pointed at the proxy
+## aider — the cheap editor
 
-- `ANTHROPIC_BASE_URL` towards an Anthropic-compatible proxy (what
-  claude-code-router does).
-- Pro: keep habits, skills, hooks — which [always work](../architecture/claude-code-aider.md).
-- Con: token-"hungry"; some features assume Claude (caching, tool schema,
-  thinking). To be evaluated, not assumed.
+- Native OpenAI-compatible endpoint (`brain setup aider --proxy`).
+- **architect/editor** is the original 90/10: `--model` = `reasoning`
+  tier (architect), `--editor-model` = `fast` tier.
+- Frugal with tokens (repo map, doesn't read everything): the cheapest way
+  to apply a change you already know you want.
 
 ## OpenCode
 
-Open source, a TUI similar to Claude Code, native multi-provider. Third
-candidate, to try in the measurement phase.
+Open source, a TUI similar to Claude Code, native multi-provider. Passes
+the benchmark through the proxy with far fewer tokens than Claude Code
+(`brain bench run --tool opencode`); kept as a measured alternative.
 
-## On automatic routing
+## Routing
 
-The regex classifier in `router.py` is weak by nature (keyword matching).
-The better signal is **escalation on failure**: the `fast` model produces
-an edit; if tests/lint fail, retry with `reasoning`. That's v2, after
-manual routing. Details in [API layer](../architecture/api-layer.md#escalation).
+Superseded by [`brain/auto`](../architecture/auto-routing.md): a decision
+model picks the tier once per session. Escalation on failure (retry with a
+higher tier when tests fail) is a design, **not built yet**
+([API layer](../architecture/api-layer.md#escalation)).

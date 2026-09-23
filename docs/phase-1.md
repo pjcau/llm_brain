@@ -5,9 +5,11 @@ sidebar_position: 4
 
 # Phase 1 runbook: the proxy
 
-Built on 2026-09-20. From now on every LLM request from the CLIs and the
-apps goes through `brain serve` on the VPS, and **no `/v1/*` route answers
-without a client key**.
+Built and deployed on 2026-09-20 (v0.2.0; v0.3.x since). Every LLM
+request from the CLIs and the apps goes through `brain serve` on the VPS,
+and **no `/v1/*` route answers without a client key**. Server setup:
+[VPS deployment](./deploy-vps.md); every command and variable:
+[Configuration reference](./configuration.md).
 
 ## What exists
 
@@ -19,9 +21,12 @@ without a client key**.
 | Budget ring 2: daily and monthly spend from `requests`; 70% → fast only, 85% → `max_tokens` cap, 100% → 429 with `retry-after ≥ 3600` + `x-should-retry: false` | `budget.rs` | thresholds, retry-after at the window reset, effective tier |
 | Streaming pass-through with a tap that records usage at end-of-stream or client disconnect | `proxy/tap.rs` | complete and interrupted streams |
 | Usage in both dialects, streamed or not; OpenRouter's `cost` when present, tier-price estimate otherwise | `proxy/usage_parse.rs` | OpenAI/Anthropic bodies and SSE, OpenRouter's `message_delta` shape |
-| Model resolution (`brain/<tier>`, `claude-*` → profile tier, explicit ids), sanitizer for Claude Code fields, `models[]` fallbacks, `max_tokens` cap, end-user id (Claude Code's metadata reduced to its session id) | `proxy/sanitize.rs` | exact field lists |
-| `brain keys create\|list\|revoke`; OpenRouter provisioning renamed to `brain upstream provision\|list` | `main.rs` | — |
-| Board section "Proxy · day × profile × model" | `dashboard.rs` | summary shape |
+| Model resolution (`brain/<tier>`, `claude-*` → profile tier, explicit ids), sanitizer for Claude Code fields, `models[]` fallbacks, end-user id (Claude Code's metadata reduced to its session id) | `proxy/sanitize.rs` | exact field lists |
+| `brain/auto`: one tier per session picked by a decision model ([Auto routing](./architecture/auto-routing.md)) | `proxy/route.rs` | session key, TTL, decisions request/answer, off-ladder choices |
+| `max_tokens` cap = min(provider max from the OpenRouter catalog, refreshed hourly; tier's `max_output_tokens`) | `catalog.rs`, `proxy/mod.rs` | catalog parse, cap selection |
+| Serving backend recorded per request (OpenRouter's `provider` field; since v0.3.2, 2026-09-22 17:24 UTC — earlier rows are empty) | `proxy/usage_parse.rs`, `db.rs` | OpenAI body and Anthropic `message_start` |
+| `brain keys create\|list\|revoke`; OpenRouter provisioning under `brain upstream provision\|sync\|list` | `main.rs` | — |
+| The board (see below) | `dashboard.rs` | summary shape |
 
 Verified live on 2026-09-20: curl in both dialects and **Claude Code
 headless through the proxy** (`pong`, 2 turns, 6.2 s, 20.8k input tokens,
@@ -31,7 +36,8 @@ headless through the proxy** (`pong`, 2 turns, 6.2 s, 20.8k input tokens,
 ## Issue a key (on the server, admin only)
 
 ```bash
-ssh root@<vps> 'cd /opt/llm_brain && sudo -u brain ./brain keys create --profile dev --name laptop [--expires 2027-01-01] [--ip 1.2.3.4/32]'
+ssh root@<vps> 'cd /opt/llm_brain && sudo -u brain env BRAIN_HOME=/opt/llm_brain BRAIN_DB=/opt/llm_brain/data/brain.db \
+  ./brain keys create --profile dev --name laptop [--expires 2027-01-01] [--ip 1.2.3.4/32]'
 ```
 Printed once. `brain keys list` shows prefixes only; `brain keys revoke
 --profile dev --name laptop` cuts it (the proxy forgets cached keys within
@@ -39,32 +45,58 @@ Printed once. `brain keys list` shows prefixes only; `brain keys revoke
 
 ## Point the clients at the proxy
 
-Same variables as Phase 0, different base URL and key:
+`BRAIN_BASE_URL` and `BRAIN_DEV_KEY` live in the git-ignored
+`deploy/server.local.env`, sourced by `~/.bashrc`. The shell functions are
+printed by `brain setup claude-code --proxy` and `brain setup aider
+--proxy` (full text in [Configuration](./configuration.md#through-the-proxy)):
 
-```bash
-# Claude Code
-ANTHROPIC_BASE_URL=https://brain.<host>/  ANTHROPIC_AUTH_TOKEN=brain_dev_…  ANTHROPIC_MODEL=brain/fast  ANTHROPIC_DEFAULT_HAIKU_MODEL=brain/fast
-# aider
-OPENAI_API_BASE=https://brain.<host>/v1   OPENAI_API_KEY=brain_dev_…   aider --architect --model openai/brain/reasoning --editor-model openai/brain/fast
-# apps (OpenAI SDK)
-OpenAI(base_url="https://brain.<host>/v1", api_key="brain_car_…").chat.completions.create(model="brain/fast", user=user_id, …)
-```
-`brain/fast` and `brain/reasoning` are stable aliases: the model behind
-them is `config/tiers.yaml` on the server. Fallback chains and edit
-formats for aider come from `brain setup aider` as before; the `models[]`
-fallback is added by the proxy for the OpenAI dialect.
+| Client | How | Model |
+|--------|-----|-------|
+| Claude Code — the daily agent | `px-claude` (`ANTHROPIC_BASE_URL=$BRAIN_BASE_URL`, `ANTHROPIC_AUTH_TOKEN=$BRAIN_DEV_KEY`) | `ANTHROPIC_MODEL=brain/auto`, background tasks `ANTHROPIC_DEFAULT_HAIKU_MODEL=brain/fast`; pin a tier with `ANTHROPIC_MODEL=brain/agent px-claude` |
+| aider — cheap editor for targeted changes | `px-aider` (`OPENAI_API_BASE=$BRAIN_BASE_URL/v1`) | architect `openai/brain/reasoning`, editor `openai/brain/fast` |
+| apps (OpenAI SDK) | `OpenAI(base_url="https://brain.<host>/v1", api_key="brain_car_…")` | `brain/fast` or `brain/auto` + `x-brain-session: <conversation id>`; pass `user=` for per-user rate limits |
+| benchmark | `brain bench run --via-proxy https://brain.<host>` with `BRAIN_BENCH_KEY` (a `benchmark` client key) | `brain/<--tier>` unless `--model` is given |
+
+`brain/<tier>` and `brain/auto` are stable aliases: the models behind them
+are `config/tiers.yaml` on the server. The proxy adds the `models[]`
+fallback itself on the OpenAI dialect.
 
 ## What the VPS exposes
 
 | Route | Auth |
 |-------|------|
-| `/v1/*`, `/api/hello` | client key (Bearer or `x-api-key`) — no exceptions |
+| `/v1/*` | client key (Bearer or `x-api-key`) — no exceptions |
+| `/api/hello` | none: Claude Code's connectivity probe, always 204 |
 | `/`, `/api/summary` (board) | Caddy basic auth |
 | `/health` | open, returns `ok` |
 
 Rate limits: 60 req/min per key, 10 req/min per (key, end user); 20 auth
 failures in 10 minutes block the IP for the window. Ring 1 (the
 OpenRouter key's own daily limit) still holds if all of this fails.
+
+## The board
+
+`https://brain.<host>/` behind basic auth (locally: `brain serve` or the
+[Docker board](./configuration.md#the-board-brain-serve-in-docker));
+phone-friendly, reloads every 30 s, JSON on `/api/summary`. Sections, top
+to bottom:
+
+| Section | What it answers |
+|---------|-----------------|
+| Month · Budget · Spend per day | spend vs the daily limit per profile (ring-2 state), last 30 days by profile |
+| Requests per day | ok / upstream errors / refused |
+| Models | quality and cost per model, last 7 days |
+| Auto routing | `brain/auto` decisions per tier and the saving against the router's `baseline` tier |
+| Providers | which OpenRouter backend served each model, and its prompt-cache share |
+| Prompt cache | cold turns (≥ 5k prompt tokens, nothing read from cache) and what those re-reads cost |
+| Health | proxy version, catalog age, auth failures last hour, refused / upstream errors today |
+| Sessions · Proxy · Live | profile × end user, day × profile × model, last requests |
+| Anomalies · Auth failures | runaway outputs, long requests, refusals, upstream errors; last 20 auth failures |
+| Tool logs · Benchmark runs | aider / Claude Code log files ([Phase 0](./phase-0.md)), `brain bench` rows |
+
+Provider **pinning** (`provider.order` to keep a session on the backend
+that holds its cache) is the next step and not built: today the proxy only
+measures which backend served each request.
 
 ## Agents compared through the proxy
 
@@ -103,8 +135,11 @@ updated).
 
 ## Known gaps
 
-- No `fallbacks` on the Anthropic dialect yet (OpenRouter uses a different
-  parameter there); the `dev` tier fallback applies to aider/OpenAI calls.
-- Semantic L2 cache and escalation on failure are Phase 2.
+- No `models[]` fallback on the Anthropic dialect yet (OpenRouter uses a
+  different parameter there): Claude Code's requests go to the tier's
+  primary model only.
+- Provider pinning not built (see the board section above).
+- L2 response cache (`l2_cache:` in `profiles.yaml` is read but nothing
+  caches yet) and escalation on failure: not built, Phase 2.
 - `count_tokens` is forwarded as-is; OpenRouter may not implement it, and
   Claude Code then estimates locally.

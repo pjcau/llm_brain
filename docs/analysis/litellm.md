@@ -2,35 +2,22 @@
 title: LiteLLM
 ---
 
-# LiteLLM: use it, but the right way
+# LiteLLM
 
-LiteLLM already does OpenAI-compatible proxy + routing + budget + fallback.
-
-| Pros | Cons |
-|------|------|
-| Ready now, zero code | One more service to run |
-| Mature, many providers | Config-only routing, not semantic |
-| Built-in budgets and alerts | Doesn't reuse your usage DB / dashboard / router |
-
-## Recommendation: sequence, don't choose
-
-- **Phase 0 — plain LiteLLM, ~1 week, zero code.** Measure real
-  consumption (tokens/day, fast/reasoning split, cost) and pick models
-  with data in hand.
-- **Phase 1 — native proxy in llm_brain**, built with those numbers.
-
-Building before measuring is the classic way to optimize the wrong thing.
-
-:::note Superseded
-After verifying that OpenRouter speaks both dialects and offers per-key
-daily limits without a database, Phase 0 runs on **OpenRouter directly**
-and LiteLLM is out of it ([Stack](./stack.md)). This page stays as the
-record of the reasoning.
+:::note Superseded (2026-09-19)
+The first plan was "LiteLLM for a week in Phase 0, measure, then build the
+native proxy". It was dropped once OpenRouter turned out to speak both
+dialects and to offer per-key daily limits without a database: Phase 0 ran
+on **OpenRouter directly**, and llm_brain is a Rust reverse proxy with no
+LiteLLM in it ([Stack](./stack.md), [decisions](../decisions.md)).
 :::
 
-## Reuse as a library
+What still holds:
 
-LiteLLM already has the Anthropic ↔ OpenAI mapping. It is one of the three
-options for the translator ([decisions](../decisions.md)): write it from
-scratch, use LiteLLM as a library inside llm_brain, or adapt
-claude-code-router.
+- **Why not as the gateway**: budgets only with Postgres, one more service
+  to run, config-only routing, and it doesn't reuse llm_brain's usage DB,
+  board or `brain/auto`.
+- **If a format translator is ever needed** (a local provider that speaks
+  neither dialect), LiteLLM's Anthropic ↔ OpenAI mapping is a reference,
+  alongside claude-code-router. llm_brain being all Rust, it would be a
+  reference to port, not a library to embed.

@@ -1,25 +1,20 @@
 flowchart TD
     A["Incoming request<br/>(profile, alias, system?, messages, tools, temperature)"] --> B{"Does the client send a system prompt?"}
-    B -- "no (app via SDK)" --> B1["The layer prepends the profile's<br/>versioned system prompt"]
-    B -- "yes (Claude Code, aider)" --> B2["Prefix left untouched,<br/>never reordered"]
-    B1 --> C["Normalize → key =<br/>sha256(profile, alias, system_v, tools, messages, temperature)"]
-    B2 --> C
-    C --> D{"Profile L2 policy"}
-    D -- "OFF (dev)" --> H
-    D -- "exact" --> E{"hit in SQLite<br/>and not expired?"}
+    B -- "no (app via SDK)" --> B1["NOT BUILT: the layer prepends the profile's<br/>versioned system prompt"]
+    B -- "yes (Claude Code, aider)" --> B2["Prefix left untouched,<br/>never reordered (built)"]
+    B1 --> D
+    B2 --> D
+    D{"Profile l2_cache policy<br/>(NOT BUILT: read, no effect today)"}
+    D -- "off (dev)" --> H
+    D -- "exact" --> E{"sha256(profile, alias, system_v, tools, messages, temperature)<br/>hit in SQLite and not expired?"}
     D -- "semantic" --> F{"neighbour with cos ≥ 0.95<br/>same namespace?"}
     E -- "yes" --> R1["Response from cache<br/>usage: cost=0, source=l2"]
     F -- "yes" --> R1
     E -- "no" --> H
     F -- "no" --> H
-    H["L1 — prepare the call"] --> H1{"Provider with explicit cache?<br/>(Anthropic, Gemini, Qwen)"}
-    H1 -- "yes" --> H2["Insert cache_control after<br/>system+tools and on the second-to-last turn<br/>(max 4 breakpoints)"]
-    H1 -- "no (OpenAI, DeepSeek, Grok, Groq…)" --> H3["Nothing to do:<br/>a stable prefix is enough"]
-    H2 --> I["session_id = profile+conversation<br/>→ OpenRouter sticky routing"]
-    H3 --> I
-    I --> J["Call"]
-    J --> K["Read usage.prompt_tokens_details:<br/>cached_tokens, cache_write_tokens, cache_discount"]
+    H["L1 — client's cache_control and prefix passed through (built)"] --> J["Call OpenRouter"]
+    J --> K["Read usage: cached / cache-write tokens,<br/>serving backend → requests row (built)"]
     K --> L{"Cacheable in L2?<br/>no tool_use, no error,<br/>no truncated stream, temp ≤ 0.3"}
-    L -- "yes" --> M["Write to L2 with the profile's TTL"]
+    L -- "yes" --> M["NOT BUILT: write to L2 with the profile's TTL"]
     L -- "no" --> N["Respond"]
     M --> N

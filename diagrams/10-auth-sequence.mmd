@@ -1,7 +1,7 @@
 sequenceDiagram
     autonumber
     actor ADM as Admin (you)
-    participant CLI as brain CLI (on the server, via SSH/Tailscale)
+    participant CLI as brain CLI (on the server, via SSH)
     participant DB as SQLite api_keys
     participant APP as find-a-car backend
     participant MW as llm_brain auth middleware
@@ -14,12 +14,12 @@ sequenceDiagram
     CLI->>CLI: random 32 bytes → brain_car_<base64url>
     CLI->>DB: INSERT hash=sha256(key), profile=car, name, expires_at
     CLI-->>ADM: prints the key ONCE
-    ADM->>APP: puts the key in SSM / .env (never in the repo, never in the frontend)
+    ADM->>APP: puts the key in the app's .env (never in the repo, never in the frontend)
     end
 
     rect rgb(240,255,240)
     note over APP,OR: Request — every call
-    APP->>MW: POST /v1/chat/completions<br/>Authorization: Bearer brain_car_…<br/>user: "u_8f3a" · X-Brain-Run (opt.)
+    APP->>MW: POST /v1/chat/completions<br/>Authorization: Bearer brain_car_…<br/>user: "u_8f3a"
     MW->>MW: valid prefix? → sha256 → lookup (60 s cache)
     MW->>DB: SELECT profile, revoked_at, expires_at WHERE hash=?
     alt unknown / revoked / expired
@@ -31,7 +31,7 @@ sequenceDiagram
         else ok
             MW->>OR: same request, car profile's OpenRouter key
             OR-->>MW: response + usage (cached_tokens…)
-            MW->>DB: usage(profile, key, user, run, cost) · last_used_at
+            MW->>DB: requests row (profile, key, user, tokens, cost, backend) · last_used_at
             MW-->>APP: response in the client's dialect
         end
     end
@@ -41,6 +41,6 @@ sequenceDiagram
     note over ADM,APP: Rotation — zero downtime
     ADM->>CLI: brain keys create --profile car --name prod-2
     ADM->>APP: deploy with the new key
-    ADM->>CLI: brain keys revoke prod
+    ADM->>CLI: brain keys revoke --profile car --name prod
     CLI->>DB: UPDATE revoked_at=now
     end
