@@ -1,4 +1,4 @@
-//! `brain keys provision|list`: one OpenRouter key per profile, each with a
+//! `brain upstream provision|sync|list`: one OpenRouter key per profile, each with a
 //! daily limit taken from `config/profiles.yaml`. The secret is printed once
 //! as an `.env` line and never stored by us.
 

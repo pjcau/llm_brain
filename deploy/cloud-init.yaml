@@ -12,7 +12,7 @@ users:
     shell: /usr/sbin/nologin
     home: /opt/llm_brain
 write_files:
-  - path: /etc/ssh/sshd_config.d/hardening.conf
+  - path: /etc/ssh/sshd_config.d/00-hardening.conf
     content: |
       PasswordAuthentication no
       PermitRootLogin prohibit-password

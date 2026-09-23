@@ -107,7 +107,8 @@ sync` (laptop, management key) so the OpenRouter key's own limit follows.
 
 | Route | Auth |
 |-------|------|
-| `/v1/*`, `/api/hello` | client key, checked by `brain` |
+| `/v1/*` | client key, checked by `brain` |
+| `/api/hello` | none (Claude Code's connectivity probe, 204) |
 | `/health` | open |
 | `/`, `/api/summary` (board) | Caddy basic auth |
 

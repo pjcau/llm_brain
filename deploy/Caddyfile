@@ -1,20 +1,20 @@
 # /etc/caddy/Caddyfile — replace the host with your subdomain, or use the
 # sslip.io form (brain.<ip-with-dashes>.sslip.io) without owning a domain.
-# The board and, later, the proxy: /health, /api/*, /v1/* and / go to brain.
-# Until the Phase 1 key middleware exists, the board is behind basic auth:
+# The proxy routes go straight to brain, which checks the client key itself;
+# the board stays behind basic auth:
 #   caddy hash-password --plaintext '<password>'  → paste the hash below.
 brain.1-2-3-4.sslip.io {
     encode zstd gzip
-    @open path /health
+    @open path /health /api/hello /v1/*
     handle @open {
-        reverse_proxy 127.0.0.1:8080
+        reverse_proxy 127.0.0.1:8080 {
+            flush_interval -1   # SSE: never buffer the streamed replies
+        }
     }
     handle {
         basic_auth {
             pjonny <bcrypt-hash>
         }
-        reverse_proxy 127.0.0.1:8080 {
-            flush_interval -1   # SSE: never buffer (needed by the Phase 1 proxy)
-        }
+        reverse_proxy 127.0.0.1:8080
     }
 }

@@ -1,9 +1,11 @@
-//! `brain` — llm_brain CLI. Phase 0 surface:
+//! `brain` — llm_brain CLI:
 //!   brain upstream provision|sync|list  OpenRouter keys, one per profile, daily limits
-//!   brain keys create|list|revoke  client keys (Phase 1): brain_<profile>_…
+//!   brain keys create|list|revoke  client keys for the proxy: brain_<profile>_…
 //!   brain usage snapshot|report    spend per profile from GET /key, stored in SQLite
 //!   brain setup claude-code|aider  client configuration for a profile
 //!   brain bench run|report         the real-bug suite
+//!   brain serve                    the proxy (/v1/*) and the board
+//!   brain models · events ingest|report   catalog facts per tier; errors and anomalies from tool logs
 
 mod auth;
 mod bench;
@@ -25,7 +27,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "brain", version, about = "llm_brain CLI (Phase 0)")]
+#[command(
+    name = "brain",
+    version,
+    about = "llm_brain CLI: proxy, keys, budgets, benchmark"
+)]
 struct Cli {
     /// Directory with profiles.yaml and tiers.yaml (default: nearest ./config)
     #[arg(long, global = true)]

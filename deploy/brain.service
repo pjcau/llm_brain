@@ -1,4 +1,4 @@
-# /etc/systemd/system/brain.service — the board today, the proxy in Phase 1.
+# /etc/systemd/system/brain.service — the proxy (/v1/*) and the board.
 # Secrets from /opt/llm_brain/.env (mode 0600, owner brain). Binds to
 # localhost only; Caddy terminates TLS in front.
 [Unit]
